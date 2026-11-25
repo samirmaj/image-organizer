@@ -39,6 +39,7 @@ CONFIG_NAME = "keywords.json"
 REPORT_NAME = "keyword_report.csv"
 FOLDER_REPORT_NAME = "folder_report.csv"
 PLAN_NAME = "sort_plan.csv"
+ERRORS_NAME = "apply_errors.csv"
 UNDO_PREFIX = "undo_log_"
 
 # Words that say nothing about the content of an image. They are ignored when
@@ -439,9 +440,48 @@ def group_leftovers(leftovers, ignore, min_size):
     return assigned
 
 
+WINDOWS_RESERVED = {"con", "prn", "aux", "nul"} | \
+    {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+
+
 def safe_folder_name(text):
-    text = re.sub(r'[<>:"/\\|?*]+', " ", text).strip(" .")
-    return text or "group"
+    """Make one folder name valid on Windows: no <>:"/\\|?* or control
+    characters, no trailing spaces or dots (Windows drops them, and then the
+    move fails with WinError 267), and no reserved names like CON or AUX."""
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    if text.split(".")[0].lower() in WINDOWS_RESERVED:
+        text += "_"
+    return text or "_"
+
+
+def safe_folder_path(path):
+    """'people/Alexa Chung ./2019' -> 'people/Alexa Chung/2019'"""
+    parts = [p for p in re.split(r"[/\\]+", path.strip()) if p.strip(" .")]
+    return "/".join(safe_folder_name(p) for p in parts)
+
+
+def long_path(path):
+    """On Windows, paths over 260 characters fail unless written as
+    \\\\?\\C:\\... . Elsewhere the path is returned unchanged."""
+    if os.name != "nt":
+        return path
+    path = os.path.abspath(path)
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
+def blocking_file(folder, rel_dir):
+    """Return the part of rel_dir that exists as a file instead of a folder."""
+    cur = folder
+    for part in rel_dir.split("/"):
+        cur = os.path.join(cur, part)
+        if os.path.isfile(long_path(cur)):
+            return os.path.relpath(cur, folder)
+    return None
 
 
 def cmd_plan(args):
@@ -519,6 +559,7 @@ def cmd_plan(args):
     # Files already in their destination need no move.
     rows = []
     for rel, dest, reason in plan:
+        dest = safe_folder_path(dest)
         current = os.path.dirname(rel)
         if current.lower() == dest.lower():
             continue
@@ -556,11 +597,11 @@ def cmd_plan(args):
 # --------------------------------------------------------------------------
 
 def unique_target(path):
-    if not os.path.exists(path):
+    if not os.path.exists(long_path(path)):
         return path
     stem, ext = os.path.splitext(path)
     i = 1
-    while os.path.exists(f"{stem} ({i}){ext}"):
+    while os.path.exists(long_path(f"{stem} ({i}){ext}")):
         i += 1
     return f"{stem} ({i}){ext}"
 
@@ -570,7 +611,7 @@ def remove_empty_dirs(dirs, folder):
     for d in sorted(dirs, key=len, reverse=True):
         while os.path.abspath(d) != folder:
             try:
-                os.rmdir(d)
+                os.rmdir(long_path(d))
             except OSError:
                 break
             d = os.path.dirname(d)
@@ -594,36 +635,59 @@ def cmd_apply(args):
 
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     undo_path = os.path.join(folder, f"{UNDO_PREFIX}{stamp}.csv")
-    moved = missing = failed = 0
+    moved = missing = 0
+    errors = []        # (file, move_to, error)
     emptied = set()
+    # Every move is written to the undo log right away, so 'undo' also works
+    # after an apply that stopped halfway or had errors.
     with open(undo_path, "w", newline="", encoding="utf-8-sig") as uf:
         uw = csv_writer(uf)
         uw.writerow(["moved_from", "moved_to"])
         for r in rows:
-            src = os.path.join(folder, *r["file"].split("/"))
-            dest_dir = os.path.join(folder, *r["move_to"].strip("/").split("/"))
-            if not os.path.exists(src):
+            rel_dest = safe_folder_path(r["move_to"])
+            src = os.path.join(folder, *r["file"].strip().split("/"))
+            dest_dir = os.path.join(folder, *rel_dest.split("/"))
+            if not os.path.exists(long_path(src)):
                 missing += 1
                 continue
+            blocker = blocking_file(folder, rel_dest)
+            if blocker:
+                errors.append((r["file"], rel_dest,
+                               f"a file is in the way: {blocker}"))
+                continue
             try:
-                os.makedirs(dest_dir, exist_ok=True)
+                os.makedirs(long_path(dest_dir), exist_ok=True)
                 dst = unique_target(os.path.join(dest_dir, os.path.basename(src)))
-                shutil.move(src, dst)
+                shutil.move(long_path(src), long_path(dst))
                 emptied.add(os.path.dirname(src))
                 uw.writerow([os.path.relpath(src, folder).replace(os.sep, "/"),
                              os.path.relpath(dst, folder).replace(os.sep, "/")])
                 uf.flush()
                 moved += 1
             except OSError as e:
-                failed += 1
-                print(f"  could not move {r['file']}: {e}")
+                errors.append((r["file"], rel_dest,
+                               f"{type(e).__name__}: {e.strerror or e}"
+                               + (f" (WinError {e.winerror})"
+                                  if getattr(e, "winerror", None) else "")))
 
     remove_empty_dirs(emptied, folder)
     print(f"Moved {moved} files.")
     if missing:
         print(f"Skipped {missing} files that no longer exist.")
-    if failed:
-        print(f"{failed} files could not be moved (see above).")
+    err_path = os.path.join(folder, ERRORS_NAME)
+    if not errors and os.path.exists(err_path):
+        os.remove(err_path)    # left over from an earlier run
+    if errors:
+        with open(err_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv_writer(f)
+            w.writerow(["file", "move_to", "error"])
+            w.writerows(errors)
+        print(f"{len(errors)} files could not be moved. All of them are listed "
+              f"in {ERRORS_NAME}. The first few:")
+        for file, dest, err in errors[:5]:
+            print(f"  {file}\n    -> {dest}\n    {err}")
+        print("Everything that did move can still be reversed with 'undo'. "
+              "Run 'plan' and 'apply' again to retry the rest.")
     print(f"Undo log: {os.path.basename(undo_path)}  (run 'undo' to reverse)")
 
 
@@ -648,22 +712,36 @@ def cmd_undo(args):
             sys.exit("Cancelled.")
 
     restored = 0
+    failed = []
     touched_dirs = set()
     for r in reversed(rows):
         cur = os.path.join(folder, *r["moved_to"].split("/"))
         orig = os.path.join(folder, *r["moved_from"].split("/"))
-        if not os.path.exists(cur):
+        if not os.path.exists(long_path(cur)):
             print(f"  missing, skipped: {r['moved_to']}")
             continue
-        os.makedirs(os.path.dirname(orig), exist_ok=True)
-        shutil.move(cur, unique_target(orig))
+        try:
+            os.makedirs(long_path(os.path.dirname(orig)), exist_ok=True)
+            shutil.move(long_path(cur), long_path(unique_target(orig)))
+        except OSError as e:
+            failed.append(r)
+            print(f"  could not move back {r['moved_to']}: {e}")
+            continue
         touched_dirs.add(os.path.dirname(cur))
         restored += 1
 
     remove_empty_dirs(touched_dirs, folder)
-
-    os.replace(log, log[:-4] + "_undone.csv")
     print(f"Moved {restored} files back.")
+    if failed:
+        # Keep only the failed rows, so running 'undo' again retries them.
+        with open(log, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv_writer(f)
+            w.writerow(["moved_from", "moved_to"])
+            w.writerows([r["moved_from"], r["moved_to"]] for r in reversed(failed))
+        print(f"{len(failed)} files could not be moved back. "
+              "Run 'undo' again to retry them.")
+    else:
+        os.replace(log, log[:-4] + "_undone.csv")
 
 
 # --------------------------------------------------------------------------

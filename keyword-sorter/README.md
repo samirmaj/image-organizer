@@ -82,6 +82,16 @@ Images that match no keyword in their filename or folder names go into `_to sort
 If a group turns out to be a real category, add its word to a rule and run
 `plan` and `apply` again.
 
+## If some files could not be moved
+
+`apply` keeps going when a file can't be moved, lists every failure in
+`apply_errors.csv` and prints the first few. Everything that did move is in the
+undo log, so `undo` still works. Run `plan` and `apply` again to retry the rest.
+
+Folder names are cleaned for Windows before anything is created: trailing spaces
+and dots, characters like `:` or `?`, and reserved names like `CON` are fixed.
+Very long paths (over 260 characters) are supported too.
+
 ## Editing the plan by hand
 
 `sort_plan.csv` opens in Excel. You can change the `move_to` column or delete

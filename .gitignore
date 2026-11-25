@@ -7,3 +7,4 @@ keyword_report.csv
 folder_report.csv
 sort_plan.csv
 undo_log_*.csv
+apply_errors.csv
