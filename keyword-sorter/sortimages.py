@@ -6,7 +6,8 @@ Only needs Python 3.8+ (no extra packages). Works on Windows, macOS and Linux.
 
 Workflow (run these inside your image folder, or pass the folder path):
 
-  1. py sortimages.py scan      Count the words in your filenames and write a
+  1. py sortimages.py scan      Count the words in your filenames and folder
+                                names (all subfolders included) and write a
                                 starter keywords.json plus a word report.
                                 Edit keywords.json to add people, brands, etc.
   2. py sortimages.py plan      Preview: decide a destination for every image
@@ -229,29 +230,47 @@ def ignore_set(cfg):
     return DEFAULT_IGNORE | {w.lower() for w in cfg.get("ignore_words", [])}
 
 
-def find_images(folder, recursive, skip_dirs):
-    """Yield paths (relative to folder, with '/') of images to sort."""
-    skip_dirs = {d.lower() for d in skip_dirs}
+SYSTEM_DIRS = {"$recycle.bin", "system volume information", "__pycache__",
+               "node_modules"}
+
+
+def find_images(folder, top_only=False):
+    """Yield paths (relative to folder, with '/') of all images, including
+    every subfolder unless top_only is set. Hidden and system folders are
+    skipped."""
     for root, dirs, files in os.walk(folder):
         rel_root = os.path.relpath(root, folder)
         rel_root = "" if rel_root == "." else rel_root.replace(os.sep, "/")
-        if rel_root:
-            top = rel_root.split("/")[0].lower()
-            if top in skip_dirs:
-                dirs[:] = []
-                continue
         for name in sorted(files):
             if os.path.splitext(name)[1].lower() in IMAGE_EXTS:
                 yield f"{rel_root}/{name}" if rel_root else name
-        if not recursive:
+        if top_only:
             break
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(d for d in dirs
+                         if not d.startswith((".", "$"))
+                         and d.lower() not in SYSTEM_DIRS)
 
 
-def target_top_dirs(cfg):
-    tops = {folder.split("/")[0] for folder in cfg["rules"]}
-    tops.add(cfg["leftovers_folder"].split("/")[0])
-    return tops
+def folder_parts(rel):
+    """'a/b/c.jpg' -> ['a', 'b']"""
+    return rel.split("/")[:-1]
+
+
+def under(path, base):
+    """True if folder path is base or inside it (case-insensitive)."""
+    p, b = path.lower().strip("/"), base.lower().strip("/")
+    return p == b or p.startswith(b + "/")
+
+
+def already_sorted(rel, cfg):
+    """An image counts as sorted when it sits in a rule's destination folder
+    or in any subfolder you made inside one (e.g. people/Alexa Chung/2019)."""
+    current = "/".join(folder_parts(rel))
+    return any(under(current, dest) for dest in cfg["rules"])
+
+
+def in_leftovers(rel, cfg):
+    return under("/".join(folder_parts(rel)), cfg["leftovers_folder"])
 
 
 # --------------------------------------------------------------------------
@@ -265,24 +284,29 @@ def cmd_scan(args):
     if os.path.exists(cfg_path):
         existing = load_config(folder)
     ignore = ignore_set(existing) if existing else set(DEFAULT_IGNORE)
-    skip = target_top_dirs(existing) if existing else set()
-
-    files = list(find_images(folder, args.recursive, skip))
+    files = list(find_images(folder, args.top_only))
     if not files:
         sys.exit(f"No images found in {folder}.")
+    n_folders = len({"/".join(folder_parts(r)) for r in files})
 
     word_count = collections.Counter()
     pair_count = collections.Counter()
     examples = {}
     for rel in files:
-        stem = os.path.splitext(os.path.basename(rel))[0]
-        words = [w for w in split_words(stem) if not is_noise(w, ignore)]
-        for w in set(words):
+        # Words from the filename and from every folder it sits in, so a
+        # folder called "Alexa Chung" counts for all images inside it.
+        names = [os.path.splitext(os.path.basename(rel))[0]] + folder_parts(rel)
+        singles, pairs = set(), set()
+        for name in names:
+            words = [w for w in split_words(name) if not is_noise(w, ignore)]
+            singles.update(words)
+            pairs.update(f"{a} {b}" for a, b in zip(words, words[1:]))
+        for w in singles:
             word_count[w] += 1
             examples.setdefault(w, rel)
-        for a, b in set(zip(words, words[1:])):
-            pair_count[f"{a} {b}"] += 1
-            examples.setdefault(f"{a} {b}", rel)
+        for pr in pairs:
+            pair_count[pr] += 1
+            examples.setdefault(pr, rel)
 
     rules = existing["rules"] if existing else STARTER_RULES
     min_sq = existing["min_substring_length"] if existing else 6
@@ -332,7 +356,7 @@ def cmd_scan(args):
         json.dump(cfg, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print(f"Scanned {len(files)} images in {folder}")
+    print(f"Scanned {len(files)} images in {n_folders} folders under {folder}")
     print(f"{action} {CONFIG_NAME}")
     print(f"Wrote {REPORT_NAME} ({len(rows)} recurring words and word pairs)")
     print("\nMost frequent words that no rule uses yet:")
@@ -398,25 +422,39 @@ def cmd_plan(args):
     rules = [(dest, [Keyword(k, min_sq) for k in kws])
              for dest, kws in cfg["rules"].items()]
 
-    # Folders made by the sorter are skipped, except the leftovers folder, so
-    # that a re-run with new keywords can pull images out of "_to sort".
-    skip = set() if args.resort else \
-        target_top_dirs(cfg) - {cfg["leftovers_folder"].split("/")[0]}
-    files = list(find_images(folder, args.recursive, skip))
+    all_files = list(find_images(folder, args.top_only))
+    # Images already in a destination folder stay where they are, unless
+    # --resort is given. Images in the leftovers folder are always re-checked,
+    # so a re-run with new keywords pulls them out of "_to sort".
+    files = all_files if args.resort else \
+        [f for f in all_files if not already_sorted(f, cfg)]
     if not files:
-        sys.exit("No images to sort. Use -r to include subfolders.")
+        sys.exit(f"No images to sort ({len(all_files)} are already sorted).")
 
     plan = []          # (file, destination folder, reason)
     leftovers = []
     for rel in files:
         stem = os.path.splitext(os.path.basename(rel))[0]
-        words = split_words(stem)
-        sq = squash(stem)
+        # Try the filename first, then the folders it sits in, innermost first,
+        # so "Alexa Chung/IMG_0001.jpg" still goes to people/Alexa Chung.
+        # The leftovers folder's own name is not a keyword source.
+        parents = folder_parts(rel)
+        if in_leftovers(rel, cfg):
+            parents = parents[len(cfg["leftovers_folder"].strip("/").split("/")):]
+        # A folder match keeps the subfolders below the matched folder, so
+        # "Alexa Chung/2019/x.jpg" goes to "people/Alexa Chung/2019".
+        sources = [("keyword", stem, [])] + \
+            [("folder keyword", parents[i], parents[i + 1:])
+             for i in reversed(range(len(parents)))]
         hit = None
-        for dest, kws in rules:
-            for kw in kws:
-                if kw.matches(words, sq):
-                    hit = (dest, f"keyword: {kw.raw}")
+        for label, name, below in sources:
+            words, sq = split_words(name), squash(name)
+            for dest, kws in rules:
+                for kw in kws:
+                    if kw.matches(words, sq):
+                        hit = ("/".join([dest] + below), f"{label}: {kw.raw}")
+                        break
+                if hit:
                     break
             if hit:
                 break
@@ -434,7 +472,19 @@ def cmd_plan(args):
             plan.append([rel, f"{base}/{safe_folder_name(g)}",
                          f"shared word: {g}"])
         else:
-            plan.append([rel, f"{base}/_no pattern", "no keyword or pattern"])
+            # Keep images from the same original folder together, so the
+            # context of a folder like "Paris 2019" is not lost.
+            parents = folder_parts(rel)
+            if in_leftovers(rel, cfg):
+                parents = parents[len(base.split("/")):]
+                if parents and parents[0] == "_no pattern":
+                    parents = parents[1:]
+            if parents:
+                plan.append([rel, f"{base}/" + "/".join(parents),
+                             "no keyword, kept with its folder"])
+            else:
+                plan.append([rel, f"{base}/_no pattern",
+                             "no keyword or pattern"])
 
     # Files already in their destination need no move.
     rows = []
@@ -452,11 +502,18 @@ def cmd_plan(args):
 
     by_dest = collections.Counter(r[1] for r in rows)
     matched = sum(1 for r in rows if r[2].startswith("keyword"))
+    by_folder = sum(1 for r in rows if r[2].startswith("folder keyword"))
     grouped = sum(1 for r in rows if r[2].startswith("shared"))
-    loose = sum(1 for r in rows if r[2].startswith("no keyword"))
-    print(f"Preview for {len(files)} images in {folder}  (nothing was moved)\n")
-    print(f"  {matched:>5}  matched a keyword")
+    kept = sum(1 for r in rows if r[2].endswith("kept with its folder"))
+    loose = sum(1 for r in rows if r[2] == "no keyword or pattern")
+    print(f"Preview for {len(all_files)} images in {folder}  "
+          "(nothing was moved)\n")
+    print(f"  {len(all_files) - len(files):>5}  already sorted, left alone")
+    print(f"  {len(files) - len(rows):>5}  already where the plan puts them")
+    print(f"  {matched:>5}  keyword in the filename")
+    print(f"  {by_folder:>5}  keyword in a folder name")
     print(f"  {grouped:>5}  leftovers grouped by a shared word or prefix")
+    print(f"  {kept:>5}  leftovers kept together with their original folder")
     print(f"  {loose:>5}  leftovers with no pattern\n")
     for dest, n in sorted(by_dest.items(), key=lambda x: x[0].lower()):
         print(f"  {n:>5}  {dest}")
@@ -587,23 +644,27 @@ def main(argv=None):
         epilog="Run the steps in order: scan, plan, apply. 'undo' reverses apply.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add_common(sp, recursive_help):
+    def add_common(sp):
         sp.add_argument("folder", nargs="?", default=".",
-                        help="image folder (default: the current folder)")
+                        help="image folder (default: the current folder); "
+                             "all subfolders are included")
+        sp.add_argument("--top-only", action="store_true",
+                        help="only look at images directly in the folder, "
+                             "not in subfolders")
+        # Subfolders are always included now; -r is accepted for old habits.
         sp.add_argument("-r", "--recursive", action="store_true",
-                        help=recursive_help)
+                        help=argparse.SUPPRESS)
 
     s = sub.add_parser("scan", help="count filename words, create keywords.json")
-    add_common(s, "also look at images in subfolders")
+    add_common(s)
     s.add_argument("--suggestions", type=int, default=150,
                    help="how many unused frequent words to list (default 150)")
     s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("plan", help="preview where every image would go")
-    add_common(s, "also sort images in subfolders (sorted folders are "
-                  "skipped, the leftovers folder is re-checked)")
+    add_common(s)
     s.add_argument("--resort", action="store_true",
-                   help="with -r, also re-check images already in sorted folders")
+                   help="also re-check images already in sorted folders")
     s.add_argument("--no-groups", action="store_true",
                    help="do not group leftovers by shared words")
     s.set_defaults(func=cmd_plan)
