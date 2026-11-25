@@ -6,9 +6,9 @@ Only needs Python 3.8+ (no extra packages). Works on Windows, macOS and Linux.
 
 Workflow (run these inside your image folder, or pass the folder path):
 
-  1. py sortimages.py scan      Count the words in your filenames and folder
-                                names (all subfolders included) and write a
-                                starter keywords.json plus a word report.
+  1. py sortimages.py scan      Count the words in your filenames (all
+                                subfolders included) and write a starter
+                                keywords.json, a word report and a folder list.
                                 Edit keywords.json to add people, brands, etc.
   2. py sortimages.py plan      Preview: decide a destination for every image
                                 and write sort_plan.csv. Nothing is moved.
@@ -37,6 +37,7 @@ IMAGE_EXTS = {
 
 CONFIG_NAME = "keywords.json"
 REPORT_NAME = "keyword_report.csv"
+FOLDER_REPORT_NAME = "folder_report.csv"
 PLAN_NAME = "sort_plan.csv"
 UNDO_PREFIX = "undo_log_"
 
@@ -156,6 +157,17 @@ def strip_accents(text):
 def split_words(stem):
     """'AlexaChung_NYFW-2019 (2)' -> ['alexa', 'chung', 'nyfw', '2019', '2']"""
     s = strip_accents(stem)
+    # Drop random ids before splitting, or a hash like '3f9a2c7e' would fall
+    # apart into fake words ('f', 'a', 'c', 'e'). An id is a run of hex
+    # characters with digits in it, or a long run that keeps switching
+    # between letters and digits. 'alexachung2019' or 'SS24' are kept.
+    def is_id(tok):
+        if len(tok) >= 6 and re.fullmatch(r"[0-9a-fA-F]+", tok) and \
+                re.search(r"\d", tok) and re.search(r"[a-fA-F]", tok):
+            return True
+        return len(tok) >= 8 and \
+            len(re.findall(r"[A-Za-z]+|\d+", tok)) >= 5
+    s = " ".join(t for t in re.split(r"[^A-Za-z0-9&]+", s) if t and not is_id(t))
     s = s.replace("&", " & ")
     # split camelCase / PascalCase and letter-digit boundaries
     s = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)
@@ -289,23 +301,26 @@ def cmd_scan(args):
         sys.exit(f"No images found in {folder}.")
     n_folders = len({"/".join(folder_parts(r)) for r in files})
 
+    # Suggestions come from filenames only. Folder names are listed in a
+    # separate report: counting them once per image would just rank the
+    # biggest folders first.
     word_count = collections.Counter()
     pair_count = collections.Counter()
+    word_folders = collections.defaultdict(set)
     examples = {}
+    folder_images = collections.Counter()
     for rel in files:
-        # Words from the filename and from every folder it sits in, so a
-        # folder called "Alexa Chung" counts for all images inside it.
-        names = [os.path.splitext(os.path.basename(rel))[0]] + folder_parts(rel)
-        singles, pairs = set(), set()
-        for name in names:
-            words = [w for w in split_words(name) if not is_noise(w, ignore)]
-            singles.update(words)
-            pairs.update(f"{a} {b}" for a, b in zip(words, words[1:]))
-        for w in singles:
+        parent = "/".join(folder_parts(rel))
+        folder_images[parent] += 1
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        words = [w for w in split_words(stem) if not is_noise(w, ignore)]
+        for w in set(words):
             word_count[w] += 1
+            word_folders[w].add(parent)
             examples.setdefault(w, rel)
-        for pr in pairs:
+        for pr in set(f"{a} {b}" for a, b in zip(words, words[1:])):
             pair_count[pr] += 1
+            word_folders[pr].add(parent)
             examples.setdefault(pr, rel)
 
     rules = existing["rules"] if existing else STARTER_RULES
@@ -326,16 +341,26 @@ def cmd_scan(args):
     # Report: every word or word pair seen in at least 2 files.
     rows = []
     for term, n in list(word_count.items()) + list(pair_count.items()):
-        if n >= 2:
-            rows.append((n, term, "yes" if covered(term) else "", examples[term]))
-    rows.sort(key=lambda r: (-r[0], r[1]))
-    report_path = os.path.join(folder, REPORT_NAME)
-    with open(report_path, "w", newline="", encoding="utf-8-sig") as f:
+        # Two-letter words alone ('de', 'ss') are too vague to suggest.
+        if n >= 2 and (" " in term or len(term) >= 3):
+            rows.append((n, len(word_folders[term]), term,
+                         "yes" if covered(term) else "", examples[term]))
+    rows.sort(key=lambda r: (-r[0], r[2]))
+    with open(os.path.join(folder, REPORT_NAME), "w", newline="",
+              encoding="utf-8-sig") as f:
         w = csv_writer(f)
-        w.writerow(["files", "word", "already_in_a_rule", "example_file"])
+        w.writerow(["files", "folders", "word", "already_in_a_rule",
+                    "example_file"])
         w.writerows(rows)
 
-    suggestions = [r[1] for r in rows if not r[2]][:args.suggestions]
+    with open(os.path.join(folder, FOLDER_REPORT_NAME), "w", newline="",
+              encoding="utf-8-sig") as f:
+        w = csv_writer(f)
+        w.writerow(["folder", "images"])
+        for name, n in sorted(folder_images.items(), key=lambda x: x[0].lower()):
+            w.writerow([name or "(top folder)", n])
+
+    suggestions = [r[2] for r in rows if not r[3]][:args.suggestions]
 
     if existing:
         existing["suggestions"] = suggestions
@@ -358,10 +383,15 @@ def cmd_scan(args):
 
     print(f"Scanned {len(files)} images in {n_folders} folders under {folder}")
     print(f"{action} {CONFIG_NAME}")
-    print(f"Wrote {REPORT_NAME} ({len(rows)} recurring words and word pairs)")
-    print("\nMost frequent words that no rule uses yet:")
+    print(f"Wrote {REPORT_NAME} ({len(rows)} recurring filename words "
+          "and word pairs)")
+    print(f"Wrote {FOLDER_REPORT_NAME} (your {n_folders} existing folders "
+          "with image counts)")
+    print("\nMost frequent filename words that no rule uses yet:")
+    print("  files  folders  word")
     for term in suggestions[:25]:
-        print(f"  {word_count.get(term) or pair_count.get(term):>5}  {term}")
+        n = word_count.get(term) or pair_count.get(term)
+        print(f"  {n:>5}  {len(word_folders[term]):>7}  {term}")
     print(f"\nNext: add useful words to the rules in {CONFIG_NAME}, "
           "then run 'plan' to preview.")
 

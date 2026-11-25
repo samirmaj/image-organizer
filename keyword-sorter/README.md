@@ -16,7 +16,7 @@ type `cmd` and press Enter.
 
 | Step | Command | What it does |
 |---|---|---|
-| 1 | `py sortimages.py scan` | Counts words in all filenames and folder names. Creates `keywords.json` (starter rules) and `keyword_report.csv` (every recurring word and word pair, with how many files have it). |
+| 1 | `py sortimages.py scan` | Counts words in all filenames. Creates `keywords.json` (starter rules), `keyword_report.csv` (every recurring filename word and word pair, with how many files and folders have it) and `folder_report.csv` (your existing folders with image counts). |
 | 2 | `py sortimages.py plan` | Preview only. Decides a destination for every image and writes `sort_plan.csv`. Prints a summary per folder. |
 | 3 | `py sortimages.py apply` | Moves the files as written in `sort_plan.csv`, after you type `yes`. Writes `undo_log_<time>.csv`. |
 | 4 | `py sortimages.py undo` | Moves everything from the most recent apply back. Run it again to undo the one before. |
@@ -62,7 +62,8 @@ Add `--top-only` to look only at images directly in the folder.
   inside longer words (`alexachungnyfw.jpg`); short ones like `cos` or `hm` only
   match as a whole word, so `cosmos.jpg` is not sent to COS.
 - `suggestions` lists the most frequent words in your filenames that no rule uses
-  yet. Move useful ones into a rule. Running `scan` again refreshes this list and
+  yet. Folder names are not counted here (see `folder_report.csv`), and random
+  ids like `3f9a2c7e` are skipped. Move useful ones into a rule. Running `scan` again refreshes this list and
   keeps your rules.
 - `ignore_words` adds words that should never count (camera prefixes like `IMG`
   and `DSC` are already ignored).
