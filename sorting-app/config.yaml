@@ -1,0 +1,8 @@
+# The folder the app opens on the very first start. Afterwards it reopens the folder
+# you last chose with "Change folder…" (remembered in appdata/state.json).
+image_root: C:\Users\Administrator\Pictures
+data_dir: ./appdata            # thumbnail cache, screen-size copies, move log, undo history
+port: 8001                     # 8001, so it can run next to image-app (8000)
+display_size: 1600             # the enlarged view shows a copy with this long side; the original loads when you zoom in
+image_extensions: [.jpg, .jpeg, .png, .webp, .jfif, .gif, .bmp, .tif, .tiff]
+skip_folders: [appdata, $recycle.bin, node_modules]   # never shown (folders starting with "." are skipped too)
