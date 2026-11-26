@@ -377,7 +377,9 @@ class Library:
         return folder == t or folder.startswith(t + "/")
 
     def in_folder(self, folder, recursive):
-        if recursive:
+        # The trash keeps each image's original subfolder (_trash/photos/a.jpg), so it always
+        # shows everything inside it, whether "subfolders" is on or not.
+        if recursive or self.in_trash(folder):
             # the trash only shows when you open it, not as a subfolder of the top folder
             pre = folder + "/" if folder else ""
             skip_trash = not self.in_trash(folder)
