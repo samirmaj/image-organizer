@@ -48,6 +48,19 @@ including the original names, and removes folders that the move created if they 
 again. It keeps the last 50 moves, also after a restart. Every move and undo is written to
 `appdata/moves.log`.
 
+**Resolution on hover.** Hovering a thumbnail shows its pixel size and file size in the
+top-right corner (e.g. "3000 × 2000 · 894 KB"), so you can keep the best copy of a duplicate.
+An image whose size isn't known yet gets it read from the file header on hover.
+
+**Trash.** **🗑 Trash** in the selection bar (or the Delete key) moves the selected images into
+the trash folder (`_trash` inside the open folder, set by `trash_folder` in `config.yaml`).
+Each image keeps its subfolder there (`photos/a.jpg` → `_trash/photos/a.jpg`). In the
+enlarged view, Delete trashes the image you're looking at and shows the next one. Like any
+move, Undo (Ctrl+Z) puts it back. The trash doesn't show up in the "subfolders" view of other
+folders. Click **🗑 Trash (N)** in the sidebar to look at it. **Empty trash…** sends its contents to the
+Windows Recycle Bin, where they can still be restored; you can also just delete the folder
+in Explorer.
+
 **Name groups (left, second tab).** Groups the images of the open folder by the first words
 of their file name, ignoring numbers and hash-like strings. For example, `nyfw_001.jpg` and
 `NYFW-2024-17.jpg` both go into *nyfw*. Click a group to show only its images, or

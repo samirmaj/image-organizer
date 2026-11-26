@@ -115,6 +115,67 @@ class Mover:
             return {"moved": len(done), "renamed": renamed, "skipped": skipped,
                     "errors": errors, "dest": dest, "moved_to": [b for _, b in done]}
 
+    def trash(self, rels):
+        """Move images into the trash folder, each into the same subfolder it came from
+        (photos/a.jpg -> _trash/photos/a.jpg). Undo puts them back like any move."""
+        lib = self.lib
+        trash = lib.cfg["trash_folder"]
+        with lib.lock:
+            done, skipped, errors, created = [], 0, [], []
+            for rel in rels:
+                f = lib.files.get(rel)
+                if not f:
+                    errors.append([rel, "not found (rescan?)"])
+                    continue
+                if lib.in_trash(f["folder"]):
+                    skipped += 1
+                    continue
+                dest = f"{trash}/{f['folder']}" if f["folder"] else trash
+                try:
+                    created += self._make_dirs(dest)
+                    done.append([rel, self._relocate(rel, lib.abs(dest))])
+                except (OSError, ValueError) as e:
+                    errors.append([rel, str(e)])
+            if done:
+                batch = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "root": str(lib.root), "dest": trash,
+                         "moves": done, "created": created}
+                self._write_log({"action": "trash", **batch})
+                stack = self._stack()
+                stack.append(batch)
+                self._save_stack(stack)
+            return {"moved": len(done), "skipped": skipped, "errors": errors, "dest": trash}
+
+    def trash_count(self):
+        return sum(1 for f in self.lib.files.values() if self.lib.in_trash(f["folder"]))
+
+    def empty_trash(self):
+        """Send everything in the trash folder to the Windows Recycle Bin (so it can still be
+        restored from there), then remove the empty folders."""
+        from send2trash import send2trash
+        lib = self.lib
+        trash = lib.cfg["trash_folder"]
+        with lib.lock:
+            gone, errors = [], []
+            for rel in [r for r, f in lib.files.items() if lib.in_trash(f["folder"])]:
+                try:
+                    send2trash(str(lib.abs(rel)))
+                    lib.files.pop(rel)
+                    gone.append(rel)
+                except Exception as e:
+                    errors.append([rel, str(e)])
+            for folder in sorted((d for d in lib.folders if lib.in_trash(d)), key=lambda d: -d.count("/")):
+                p = lib.abs(folder)
+                try:
+                    if folder != trash and p.is_dir() and not any(p.iterdir()):
+                        p.rmdir()
+                        lib.folders.discard(folder)
+                except OSError:
+                    pass
+            lib.changed()
+            self._write_log({"action": "empty_trash", "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                             "root": str(lib.root), "recycled": gone})
+            return {"recycled": len(gone), "errors": errors}
+
     def last(self):
         stack = self._stack()
         if not stack:

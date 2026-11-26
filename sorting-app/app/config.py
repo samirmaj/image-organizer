@@ -14,5 +14,6 @@ def load_config(path=None):
     cfg.setdefault("display_size", 1600)
     cfg.setdefault("port", 8001)
     cfg["image_extensions"] = {e.lower() for e in cfg["image_extensions"]}
+    cfg["trash_folder"] = (cfg.get("trash_folder") or "_trash").strip("/\\ ")
     cfg["skip_folders"] = {s.lower() for s in cfg.get("skip_folders") or []}
     return cfg

@@ -63,6 +63,13 @@
   .tile .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 4px; font-size: 11px; background: rgba(0,0,0,.65);
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tile .cap .f { color: var(--muted); }
+  .tile .res { display: none; position: absolute; top: 4px; right: 4px; padding: 1px 6px; border-radius: 8px; font-size: 11px;
+               background: rgba(0,0,0,.75); color: var(--text); font-variant-numeric: tabular-nums; pointer-events: none; }
+  .tile:hover .res { display: block; }
+  .trashrow { display: flex; gap: 6px; align-items: center; margin: 8px 0 2px; }
+  .trashrow .nm { flex: 1; cursor: pointer; color: var(--muted); }
+  .trashrow .nm:hover { color: var(--accent); }
+  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
   .ph { position: absolute; inset: 0; display: grid; place-items: center; color: #c66; font-size: 12px; text-align: center; padding: 6px; word-break: break-all; }
   .status { color: var(--muted); padding: 16px; text-align: center; }
 
@@ -146,6 +153,11 @@
       <button @click="newFolderHere()" title="Create a subfolder in the open folder">+ New folder</button>
       <button @click="openInExplorer(folder)" title="Show the open folder in Explorer">Explorer</button>
     </div>
+    <div class="trashrow">
+      <span class="nm" @click="openFolder(trash)" :title="`Open the trash folder (${trash})`" x-text="`🗑 Trash (${trashCount})`"></span>
+      <button class="danger" x-show="trashCount" @click="emptyTrash()" :disabled="busy"
+              title="Send everything in the trash to the Windows Recycle Bin">Empty trash…</button>
+    </div>
     <template x-for="nd in visibleNodes()" :key="nd.path">
       <div class="node" :class="{ cur: nd.path === folder, drop: dropOn === nd.path }"
            :style="`padding-left:${4 + nd.depth * 14}px`" :title="(nd.path || '(top folder)') + ` · ${nd.n} here, ${nd.total} with subfolders`"
@@ -193,7 +205,8 @@
     <template x-for="t in tiles()" :key="t.i">
       <figure class="tile" :class="{ sel: t.it && sel[t.it.id], empty: !t.it }" :title="t.it ? t.it.id : ''" :draggable="!!t.it"
               @dragstart="t.it && dragStart($event, t.it)"
-              @click="t.it && tileClick($event, t.i)" @mousedown="$event.shiftKey && $event.preventDefault()" @mouseenter="hover = t.i">
+              @click="t.it && tileClick($event, t.i)" @mousedown="$event.shiftKey && $event.preventDefault()" @mouseenter="hover = t.i; t.it && needSize(t.it)">
+        <template x-if="t.it"><span class="res" x-text="resText(t.it)"></span></template>
         <template x-if="t.it && sel[t.it.id]"><span class="check">✓</span></template>
         <template x-if="t.it && !t.it.broken">
           <img decoding="async" :src="thumbUrl(t.it)" :alt="t.it.name" draggable="false" @error="t.it.broken = true"></template>
@@ -220,6 +233,8 @@
       <span class="k" x-text="k + 1"></span><span x-text="t || '(top folder)'"></span></button>
   </template>
   <button class="primary" @click="openMove()" title="Pick or create a folder (M)">Folder…</button>
+  <span class="muted">|</span>
+  <button class="danger" @click="trashSel()" x-show="!inTrash()" title="Move the selection to the trash folder (Delete key)">🗑 Trash</button>
 </div>
 
 <div class="toast" x-show="toast.text" x-cloak>
@@ -301,7 +316,7 @@
       <div x-text="'path: ' + (detail?.path || '')"></div>
     </div>
     <div class="help">
-      <kbd>←</kbd> <kbd>→</kbd> previous / next · <kbd>S</kbd> select · <kbd>I</kbd> this panel ·
+      <kbd>←</kbd> <kbd>→</kbd> previous / next · <kbd>S</kbd> select · <kbd>Del</kbd> move to trash · <kbd>I</kbd> this panel ·
       <kbd>Esc</kbd> back to the grid · click the image to zoom to 100 %, drag to pan
     </div>
   </aside>
@@ -320,7 +335,7 @@ function app() {
     root: '', tree: null, progress: null, pollTimer: null, open: {}, folder: '', recursive: false, q: '', sort: 'name', names: false, size: 160,
     items: [], total: 0, loading: false, gen: 0, hover: null,
     lay: { cols: 1, tileH: 0, rowH: 1, start: 0, end: 0, top: 0 },
-    sel: {}, nSel: 0, anchor: null, recent: [], lastMove: null, busy: false,
+    sel: {}, nSel: 0, anchor: null, recent: [], lastMove: null, busy: false, trash: '_trash', trashCount: 0, sizeAsked: {},
     note: '', noteKind: '', toast: { text: '', err: false, undo: false }, toastTimer: null,
     tab: 'folders', groups: { groups: [], singles: 0, no_words: 0 }, group: null, words: 1, minGroup: 2,
     moveDlg: { open: false, dest: '' }, rootDlg: { open: false, path: '', err: '' }, dropOn: null, dragIds: null,
@@ -352,6 +367,7 @@ function app() {
     async loadState() {
       const s = await this.api('/api/state');
       this.root = s.root; this.tree = s.tree; this.lastMove = s.last_move;
+      this.trash = s.trash; this.trashCount = s.trash_count;
       this.progress = s.progress; this.poll();
     },
     poll() {  // follow the background work until it is done
@@ -376,6 +392,17 @@ function app() {
     thumbUrl(it) { return `/thumb?id=${enc(it.id)}&v=${it.v}`; },
     fullUrl(it) { return `/full?id=${enc(it.id)}&v=${it.v}`; },
     baseUrl(it) { return `/display?id=${enc(it.id)}&v=${it.v}`; },
+    // hover label: resolution and file size; an unknown size is read from the file header
+    resText(it) {
+      const px = it.w ? `${it.w} × ${it.h}` : '…';
+      return it.b ? `${px} · ${this.fmtBytes(it.b)}` : px;
+    },
+    needSize(it) {
+      if (it.w || this.sizeAsked[it.id]) return;
+      this.sizeAsked[it.id] = true;
+      this.api('/api/size?id=' + enc(it.id)).then(d => { it.w = d.w; it.h = d.h; }).catch(() => {});
+    },
+    inTrash(p = this.folder) { return p === this.trash || p.startsWith(this.trash + '/'); },
     fmtBytes(b) { return b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.round(b / 1e3) + ' KB'; },
     flash(text, err = false, undo = false) {
       this.toast = { text, err, undo };
@@ -557,7 +584,7 @@ function app() {
       this.busy = 'move';
       try {
         const r = await this.api('/api/move', { ids, dest: dest.trim() });
-        this.tree = r.tree; this.lastMove = r.last_move; this.moveDlg.open = false;
+        this.tree = r.tree; this.lastMove = r.last_move; this.trashCount = r.trash_count; this.moveDlg.open = false;
         this.recent = [r.dest, ...this.recent.filter(t => t !== r.dest)].slice(0, 9);
         this.showInTree(r.dest);
         this.saveOpt('recent', JSON.stringify(this.recent));
@@ -572,19 +599,53 @@ function app() {
       } catch (e) { this.flash('Not moved: ' + e.message, true); }
       this.busy = false;
     },
+    trashSel() { return this.doTrash(Object.keys(this.sel)); },
+    async doTrash(ids, thenView) {
+      if (!ids.length || this.busy) return;
+      this.busy = 'move';
+      try {
+        const r = await this.api('/api/trash', { ids });
+        this.tree = r.tree; this.lastMove = r.last_move; this.trashCount = r.trash_count;
+        ids.forEach(id => this.setSel(id, false));
+        let msg = `${r.moved} moved to the trash`;
+        if (r.skipped) msg += ` · ${r.skipped} were in the trash already`;
+        if (r.errors.length) msg += ` · ${r.errors.length} failed: ${r.errors[0][1]}`;
+        this.flash(msg, !!r.errors.length, r.moved > 0);
+        await this.reloadKeepScroll(thenView);
+        if (this.tab === 'groups') this.loadGroups();
+      } catch (e) { this.flash('Not moved to the trash: ' + e.message, true); }
+      this.busy = false;
+    },
+    async trashCur() {  // in the enlarged view: trash this image, then show the next one
+      const i = this.cur, it = this.items[i];
+      if (!it || this.inTrash(it.folder)) return;
+      await this.doTrash([it.id], i);
+    },
+    async emptyTrash() {
+      if (!this.trashCount || this.busy) return;
+      if (!confirm(`Send the ${this.trashCount} images in the trash to the Windows Recycle Bin?\n\nThey can still be restored from the Recycle Bin, but no longer with Undo.`)) return;
+      this.busy = 'move';
+      try {
+        const r = await this.api('/api/empty-trash', {});
+        this.tree = r.tree; this.lastMove = r.last_move; this.trashCount = r.trash_count;
+        this.flash(`${r.recycled} images sent to the Recycle Bin` + (r.errors.length ? ` · ${r.errors.length} failed: ${r.errors[0][1]}` : ''), !!r.errors.length);
+        await this.reloadKeepScroll();
+      } catch (e) { this.flash(e.message, true); }
+      this.busy = false;
+    },
     async undo() {
       if (this.busy) return;
       this.busy = 'move';
       try {
         const r = await this.api('/api/undo', {});
-        this.tree = r.tree; this.lastMove = r.last_move;
+        this.tree = r.tree; this.lastMove = r.last_move; this.trashCount = r.trash_count;
         this.flash(r.message || `${r.undone} moved back` + (r.errors.length ? ` · ${r.errors.length} could not be moved back` : ''), !!r.errors.length || !!r.message);
         await this.reloadKeepScroll();
         if (this.tab === 'groups') this.loadGroups();
       } catch (e) { this.flash('Undo failed: ' + e.message, true); }
       this.busy = false;
     },
-    async reloadKeepScroll() {  // after a move: same view, the moved images gone
+    async reloadKeepScroll(viewAt) {  // after a move: same view, the moved images gone
       const gen = ++this.gen, a = this.lay.start, b = Math.max(this.lay.end, a + 1);
       const first = Math.floor(a / PAGE), last = Math.floor((b - 1) / PAGE), fetched = [];
       try {
@@ -597,6 +658,12 @@ function app() {
         this.items = items; this.total = ds[0].total; this.anchor = null;
       } catch (e) { this.flash(e.message, true); return; }
       await this.$nextTick(); this.layout();
+      if (viewAt !== undefined && this.cur !== null) {  // the enlarged view moves on to the next image
+        if (!this.total) { this.closeView(); return; }
+        const i = Math.min(viewAt, this.total - 1);
+        await this.ensure(i, i + 1);
+        if (this.items[i]) { Object.assign(this.zoom, { ready: false, covered: false, hires: false, hiresReady: false }); this.openView(i); }
+      }
     },
 
     // ---- enlarged view
@@ -710,12 +777,14 @@ function app() {
         else if (e.key === 'ArrowLeft') { e.preventDefault(); this.step(-1); }
         else if (e.key === 'i' || e.key === 'I') this.toggleInfo();
         else if (e.key === 's' || e.key === 'S') this.toggleCur();
+        else if (e.key === 'Delete') { e.preventDefault(); this.trashCur(); }
         return;
       }
       if (e.key === ' ' && this.hover !== null) { e.preventDefault(); this.openView(this.hover); }
       else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) { e.preventDefault(); this.selectAll(); }
       else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); if (this.lastMove) this.undo(); }
       else if (e.key === 'Escape' && this.nSel) this.clearSel();
+      else if (e.key === 'Delete' && this.nSel && !this.inTrash()) { e.preventDefault(); this.trashSel(); }
       else if ((e.key === 'm' || e.key === 'M') && this.nSel) { e.preventDefault(); this.openMove(); }
       else if (/^[1-9]$/.test(e.key) && this.nSel && !e.ctrlKey && !e.altKey && this.recent[+e.key - 1] !== undefined) this.moveTo(this.recent[+e.key - 1]);
     },

@@ -77,7 +77,11 @@ def home():
 @app.get("/api/state")
 def state():
     return {"root": str(lib.root), "images": len(lib.files), "last_move": mover.last(),
-            "tree": lib.tree(), "progress": progress_info()}
+            "tree": lib.tree(), "progress": progress_info(), **trash_info()}
+
+
+def trash_info():
+    return {"trash": cfg["trash_folder"], "trash_count": mover.trash_count()}
 
 
 def progress_info():
@@ -116,7 +120,14 @@ def rescan():
 
 def item(f):
     return {"id": f["rel"], "name": f["name"], "folder": f["folder"], "v": f["key"][:12],
-            "w": f["w"], "h": f["h"]}
+            "w": f["w"], "h": f["h"], "b": f["size"]}
+
+
+@app.get("/api/size")
+def size(id: str):
+    """Pixel size for the hover label, read from the file header if not known yet."""
+    w, h = lib.size_of(get_file(id))
+    return {"w": w, "h": h}
 
 
 @app.post("/api/list")
@@ -184,13 +195,29 @@ def move(body: dict = Body(...)):
         r = mover.move(body["ids"], body["dest"])
     except (ValueError, OSError) as e:
         bad(e)
-    return {**r, "last_move": mover.last(), "tree": lib.tree()}
+    return {**r, "last_move": mover.last(), "tree": lib.tree(), **trash_info()}
+
+
+@app.post("/api/trash")
+def trash(body: dict = Body(...)):
+    """{ids: [rel]} -> moved into the trash folder (undoable)."""
+    r = mover.trash(body["ids"])
+    return {**r, "last_move": mover.last(), "tree": lib.tree(), **trash_info()}
+
+
+@app.post("/api/empty-trash")
+def empty_trash():
+    try:
+        r = mover.empty_trash()
+    except ImportError:
+        bad("send2trash is not installed: run  pip install send2trash")
+    return {**r, "last_move": mover.last(), "tree": lib.tree(), **trash_info()}
 
 
 @app.post("/api/undo")
 def undo():
     r = mover.undo()
-    return {**r, "last_move": mover.last(), "tree": lib.tree()}
+    return {**r, "last_move": mover.last(), "tree": lib.tree(), **trash_info()}
 
 
 @app.post("/api/open-folder")

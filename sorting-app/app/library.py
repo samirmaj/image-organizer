@@ -372,11 +372,26 @@ class Library:
             node["children"].sort(key=lambda c: c["name"].lower())
         return nodes[""]
 
+    def in_trash(self, folder):
+        t = self.cfg["trash_folder"]
+        return folder == t or folder.startswith(t + "/")
+
     def in_folder(self, folder, recursive):
         if recursive:
+            # the trash only shows when you open it, not as a subfolder of the top folder
             pre = folder + "/" if folder else ""
-            return [f for f in self.files.values() if f["folder"] == folder or f["folder"].startswith(pre)]
+            skip_trash = not self.in_trash(folder)
+            return [f for f in self.files.values() if (f["folder"] == folder or f["folder"].startswith(pre))
+                    and not (skip_trash and self.in_trash(f["folder"]))]
         return [f for f in self.files.values() if f["folder"] == folder]
+
+    def size_of(self, f):
+        """Pixel size, read from the file header if not known yet (a few ms)."""
+        if f["w"] is None:
+            wh = read_size(self.root / f["rel"])
+            if self._set_size(f, wh):
+                self._store_sizes([(f["key"], *wh)])
+        return f["w"], f["h"]
 
     @staticmethod
     def gkey(f, words):
