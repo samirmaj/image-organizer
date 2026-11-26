@@ -1,5 +1,19 @@
-# Python virtual environment, logs and local Claude Code settings: stay on this computer only
+# Stays on this computer only, never uploaded to GitHub:
+# Python virtual environment, local Claude Code settings and the logs folder
+# (keyword list, keywords.json, plans and undo logs live there).
 .venv/
 logs/
 .claude/
 __pycache__/
+*.pyc
+
+# The same files, wherever the keyword sorter writes them (for example when it
+# is run inside an image folder or with --data pointing somewhere else).
+keywords.json
+keywords_backup_*.json
+keyword_report.csv
+folder_report.csv
+sort_plan.csv
+undo_log_*.csv
+apply_errors.csv
+learn_log.csv
