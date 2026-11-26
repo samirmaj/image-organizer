@@ -807,7 +807,10 @@ def group_leftovers(leftovers, ignore, min_size):
 
     counts = collections.Counter(t for ts in file_terms.values() for t in ts)
     # Prefer more files, then more words (more specific), then alphabetical.
-    candidates = sorted((t for t, n in counts.items() if n >= min_size),
+    # Groups need a word of 4+ letters: 'aab' or 'oip' folders are just
+    # pieces of random ids. Images already in such a folder stay there.
+    candidates = sorted((t for t, n in counts.items() if n >= min_size
+                         and any(len(w) >= 4 for w in t.split())),
                         key=lambda t: (-counts[t], -len(t.split()), t))
     assigned = {}
     for term in candidates:
@@ -971,8 +974,25 @@ def cmd_plan(args):
     print(f"  {grouped:>5}  leftovers grouped by a shared word or prefix")
     print(f"  {kept:>5}  leftovers kept together with their original folder")
     print(f"  {loose:>5}  leftovers with no pattern\n")
-    for dest, n in sorted(by_dest.items(), key=lambda x: x[0].lower()):
+    # Real destinations first; the leftovers folder's many groups are
+    # summed up in one line, so they do not push everything else off screen.
+    left = base.lower()
+    real = [(d, n) for d, n in by_dest.items() if not under(d, left)]
+    rest = [(d, n) for d, n in by_dest.items() if under(d, left)]
+    print("  Moves to sorted folders:")
+    if not real:
+        print("      (none)")
+    for dest, n in sorted(real, key=lambda x: x[0].lower()):
         print(f"  {n:>5}  {dest}")
+    if rest:
+        rest.sort(key=lambda x: (-x[1], x[0].lower()))
+        total = sum(n for _, n in rest)
+        print(f"\n  Moves inside {base}: {total} files into {len(rest)} "
+              "folders. The biggest:")
+        for dest, n in rest[:10]:
+            print(f"  {n:>5}  {dest}")
+        if len(rest) > 10:
+            print(f"         ... {len(rest) - 10} more, see {PLAN_NAME}")
     print(f"\nWrote {PLAN_NAME}. Open it in Excel to check or edit the "
           "'move_to' column, then run 'apply'.")
 
