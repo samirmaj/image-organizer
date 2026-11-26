@@ -76,7 +76,13 @@ sorting-app/
                      thumbs/, display/ (screen-size copies), moves.log, undo.json, state.json
 ```
 
-Thumbnails are made in the background after a scan and on demand while you scroll. They
-are stored under a key made of the file name, size and date, so moving a file does not
-make a new thumbnail. The app only ever moves files and creates folders. It never deletes
-or changes an image.
+**Large folders.** Opening a folder only lists the files, which takes about a second for
+10,000 images. Pixel sizes and thumbnails are then made in the background. The header shows
+"thumbnails 1,234 / 10,000" until that's done, and the app is usable meanwhile; the images
+on screen are always made first. The background work uses `background_threads` CPU cores
+(default 2, in `config.yaml`), and it stops as soon as you close the app or open another
+folder. Everything made so far is kept, so the next start is quick.
+
+Thumbnails are stored under a key made of the file name, size and date, so moving a file
+does not make a new thumbnail. The app only ever moves files and creates folders. It never
+deletes or changes an image.

@@ -123,6 +123,7 @@
     <input type="checkbox" x-model="recursive" @change="saveOpt('recursive', recursive ? 1 : 0); reloadAll()"> subfolders</label>
   <label><input type="checkbox" x-model="names" @change="saveOpt('names', names ? 1 : 0)"> names</label>
   <label>size <input type="range" min="80" max="320" step="10" x-model.number="size" @change="saveOpt('size', size)"></label>
+  <span class="count" x-show="workText()" x-text="workText()" title="Done in the background on a few CPU cores (background_threads in config.yaml). The app is usable meanwhile."></span>
   <span class="spacer"></span>
   <button @click="undo()" :disabled="!lastMove || busy" :title="lastMove ? `Undo: ${lastMove.n} moved to ${lastMove.dest || '(top folder)'} at ${lastMove.time}` : 'Nothing to undo'">↶ Undo move</button>
   <button @click="rescan()" :disabled="busy" title="Read the folder again (after changes made outside the app)" x-text="busy === 'scan' ? 'Scanning…' : 'Rescan'"></button>
@@ -306,7 +307,7 @@ const opt = (k, d) => { try { const v = localStorage.getItem('sorter.' + k); ret
 
 function app() {
   return {
-    root: '', tree: null, open: {}, folder: '', recursive: false, q: '', sort: 'name', names: false, size: 160,
+    root: '', tree: null, progress: null, pollTimer: null, open: {}, folder: '', recursive: false, q: '', sort: 'name', names: false, size: 160,
     items: [], total: 0, loading: false, gen: 0, hover: null,
     sel: {}, nSel: 0, anchor: null, recent: [], lastMove: null, busy: false,
     note: '', noteKind: '', toast: { text: '', err: false, undo: false }, toastTimer: null,
@@ -337,6 +338,21 @@ function app() {
     async loadState() {
       const s = await this.api('/api/state');
       this.root = s.root; this.tree = s.tree; this.lastMove = s.last_move;
+      this.progress = s.progress; this.poll();
+    },
+    poll() {  // follow the background work until it is done
+      clearTimeout(this.pollTimer);
+      this.pollTimer = setTimeout(async () => {
+        try { this.progress = await this.api('/api/progress'); } catch (e) {}
+        if (this.workText()) this.poll();
+      }, this.workText() ? 2000 : 4000);
+    },
+    workText() {
+      const p = this.progress, f = n => n.toLocaleString();
+      if (!p) return '';
+      if (p.sizes_left > 0) return `reading image sizes… ${f(p.sizes_left)} left`;
+      if (p.thumbs_left > 0) return `thumbnails ${f(p.thumbs_total - p.thumbs_left)} / ${f(p.thumbs_total)}`;
+      return '';
     },
     thumbUrl(it) { return `/thumb?id=${enc(it.id)}&v=${it.v}`; },
     fullUrl(it) { return `/full?id=${enc(it.id)}&v=${it.v}`; },

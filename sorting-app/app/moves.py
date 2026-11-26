@@ -58,7 +58,9 @@ class Mover:
         new_rel = lib.rel_of(dest)
         f = lib.files.pop(src_rel)
         f.update(rel=new_rel, name=dest.name, folder=lib.rel_of(dest.parent))
-        if dest.name != src.name:  # the cache key includes the name
+        lib.changed()
+        if dest.name != src.name:  # the cache key and the name groups depend on the name
+            f.pop("_g", None)
             st = os.stat(dest)
             f["key"] = file_key(dest.name, st.st_size, st.st_mtime_ns)
         lib.files[new_rel] = f
@@ -74,6 +76,7 @@ class Mover:
                 p.mkdir()
                 created.append(cur)
             lib.folders.add(cur)
+        lib.changed()
         return created
 
     def mkdir(self, folder_rel):
@@ -149,6 +152,7 @@ class Mover:
                     if p.is_dir() and not any(p.iterdir()):
                         p.rmdir()
                         lib.folders.discard(folder)
+                        lib.changed()
                 except OSError:
                     pass
             self._save_stack(stack)

@@ -44,6 +44,7 @@ async def lifespan(app):
     if OPEN_BROWSER:
         threading.Timer(0.5, webbrowser.open, [f"http://localhost:{cfg['port']}"]).start()
     yield
+    lib.stop_background()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -69,7 +70,13 @@ def home():
 @app.get("/api/state")
 def state():
     return {"root": str(lib.root), "images": len(lib.files), "last_move": mover.last(),
-            "tree": lib.tree()}
+            "tree": lib.tree(), "progress": lib.progress}
+
+
+@app.get("/api/progress")
+def progress():
+    """Background work: pixel sizes still to read, thumbnails still to make."""
+    return lib.progress
 
 
 @app.post("/api/root")

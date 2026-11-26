@@ -34,8 +34,12 @@ def read_size(path):
 
 
 def make_thumb(path, out):
+    """Write the WebP thumbnail. Returns the image's displayed (w, h), or None on failure."""
     try:
         with Image.open(path) as im:
+            w, h = im.size
+            if im.getexif().get(0x0112) in (5, 6, 7, 8):
+                w, h = h, w
             im.draft("RGB", (THUMB_SIZE, THUMB_SIZE))
             im = ImageOps.exif_transpose(im)
             alpha = "A" in im.mode or "transparency" in im.info
@@ -45,9 +49,9 @@ def make_thumb(path, out):
             tmp = out.with_suffix(".tmp")
             im.save(tmp, "WEBP", quality=80)
             os.replace(tmp, out)
-        return True
+        return w, h
     except Exception:
-        return False
+        return None
 
 
 def make_display(path, out, size):
@@ -97,11 +101,19 @@ class Library:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.data_dir / "cache.db", check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS sizes (key TEXT PRIMARY KEY, w INTEGER, h INTEGER)")
+        self.db_lock = threading.Lock()
         self.lock = threading.RLock()
         self.root = None
         self.files = {}     # rel -> {"rel", "name", "folder", "size", "mtime", "key", "w", "h"}
         self.folders = set()  # rel folder paths ("" = root)
-        self._warm_gen = 0
+        self.version = 0      # bumped when files are added, removed or moved
+        self.size_version = 0  # bumped when pixel sizes become known
+        self._cache = {}      # search cache: params -> list of files
+        self._gen = 0         # background job generation; a new scan cancels the old job
+        self.progress = {"sizes_left": 0, "thumbs_left": 0, "thumbs_total": 0}
+        # On-demand thumbnails (the images on screen) - at most this many at once,
+        # so fast scrolling does not start dozens of decodes in parallel.
+        self._ondemand = threading.Semaphore(cfg.get("thumb_threads", 3))
 
     # ------------------------------------------------------------ paths
 
@@ -126,6 +138,10 @@ class Library:
         return (name.startswith(".") or name.lower() in self.cfg["skip_folders"]
                 or Path(full).resolve() == self.data_dir)
 
+    def changed(self):
+        self.version += 1
+        self._cache.clear()
+
     # ------------------------------------------------------------ scan
 
     def set_root(self, root):
@@ -136,58 +152,87 @@ class Library:
             self.root = root
             return self.scan()
 
-    def _entry(self, path, folder, name):
-        st = os.stat(path)
-        key = file_key(name, st.st_size, st.st_mtime_ns)
-        rel = f"{folder}/{name}" if folder else name
-        return {"rel": rel, "name": name, "folder": folder, "size": st.st_size,
-                "mtime": st.st_mtime, "key": key, "w": None, "h": None}
+    def _walk(self):
+        """All image files under the root: (folder rel, name, stat). Uses scandir, whose
+        stat results come with the directory listing on Windows (no extra disk access)."""
+        exts = self.cfg["image_extensions"]
+        folders, out, stack = {""}, [], [(str(self.root), "")]
+        while stack:
+            path, rel = stack.pop()
+            try:
+                entries = list(os.scandir(path))
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if not self._skip_dir(e.name, e.path):
+                            sub = f"{rel}/{e.name}" if rel else e.name
+                            folders.add(sub)
+                            stack.append((e.path, sub))
+                    elif os.path.splitext(e.name)[1].lower() in exts:
+                        out.append((rel, e.name, e.stat()))
+                except OSError:
+                    continue
+        return folders, out
 
     def scan(self):
-        """Walk the root and rebuild the index. Pixel sizes come from the cache when known."""
-        exts = self.cfg["image_extensions"]
-        files, folders = {}, {""}
-        for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if not self._skip_dir(d, os.path.join(dirpath, d)))
-            folder = self.rel_of(dirpath)
-            folders.add(folder)
-            for name in filenames:
-                if os.path.splitext(name)[1].lower() in exts:
-                    try:
-                        e = self._entry(os.path.join(dirpath, name), folder, name)
-                    except OSError:
-                        continue
-                    files[e["rel"]] = e
-        known = {}
+        """List the root and rebuild the index. Only file names and dates are read here;
+        pixel sizes come from the cache, unknown ones and thumbnails follow in the background."""
+        folders, found = self._walk()
+        files = {}
+        for folder, name, st in found:
+            rel = f"{folder}/{name}" if folder else name
+            files[rel] = {"rel": rel, "name": name, "folder": folder, "size": st.st_size,
+                          "mtime": st.st_mtime, "key": file_key(name, st.st_size, st.st_mtime_ns),
+                          "w": None, "h": None}
         keys = [f["key"] for f in files.values()]
-        for i in range(0, len(keys), 500):
-            chunk = keys[i:i + 500]
-            known.update({k: (w, h) for k, w, h in self.db.execute(
-                f"SELECT key, w, h FROM sizes WHERE key IN ({','.join('?' * len(chunk))})", chunk)})
-        todo = [f for f in files.values() if f["key"] not in known]
-        with ThreadPoolExecutor() as pool:
-            for f, wh in zip(todo, pool.map(lambda f: read_size(self.root / f["rel"]), todo)):
-                known[f["key"]] = wh
-        self.db.executemany("INSERT OR REPLACE INTO sizes VALUES (?, ?, ?)",
-                            [(f["key"], *known[f["key"]]) for f in todo])
-        self.db.commit()
+        known = {}
+        with self.db_lock:
+            for i in range(0, len(keys), 900):
+                chunk = keys[i:i + 900]
+                known.update({k: (w, h) for k, w, h in self.db.execute(
+                    f"SELECT key, w, h FROM sizes WHERE key IN ({','.join('?' * len(chunk))})", chunk)})
         for f in files.values():
-            f["w"], f["h"] = known[f["key"]]
+            f["w"], f["h"] = known.get(f["key"], (None, None))
         self.files, self.folders = files, folders
-        self.start_warming()
-        return {"root": str(self.root), "images": len(files), "folders": len(folders), "new_sizes_read": len(todo)}
+        self.changed()
+        unknown = sum(1 for f in files.values() if f["key"] not in known)
+        self.start_background()
+        return {"root": str(self.root), "images": len(files), "folders": len(folders),
+                "sizes_unknown": unknown}
+
+    def _store_sizes(self, rows):
+        with self.db_lock:
+            self.db.executemany("INSERT OR REPLACE INTO sizes VALUES (?, ?, ?)", rows)
+            self.db.commit()
+
+    def _set_size(self, f, wh):
+        if wh and wh[0] and f["w"] is None:
+            f["w"], f["h"] = wh
+            self.size_version += 1
+            return True
+        return False
 
     # ------------------------------------------------------------ thumbnails
 
     def thumb(self, f):
         p = self.thumb_path(f)
         if not p.exists():
-            make_thumb(self.root / f["rel"], p)
+            with self._ondemand:
+                if not p.exists():
+                    wh = make_thumb(self.root / f["rel"], p)
+                    if self._set_size(f, wh):
+                        self._store_sizes([(f["key"], *wh)])
         return p if p.exists() else None
 
     def display(self, f):
         """Screen-size copy for images larger than display_size, else None (use the original)."""
         size = self.cfg["display_size"]
+        if f["w"] is None:
+            wh = read_size(self.root / f["rel"])
+            if self._set_size(f, wh):
+                self._store_sizes([(f["key"], *wh)])
         if not f["w"] or max(f["w"], f["h"]) <= size:
             return None
         p = self.display_path(f)
@@ -195,18 +240,59 @@ class Library:
             make_display(self.root / f["rel"], p, size)
         return p if p.exists() else None
 
-    def start_warming(self):
-        """Make the missing thumbnails in the background, so scrolling is fast later."""
-        self._warm_gen += 1
-        gen, files = self._warm_gen, list(self.files.values())
+    def stop_background(self):
+        """Cancel the background job (on exit: Python waits for queued pool tasks before it
+        quits, so without this, Ctrl+C would leave it making thumbnails until all are done)."""
+        self._gen += 1
+
+    def start_background(self):
+        """Read unknown pixel sizes, then make missing thumbnails - on a few threads only
+        (background_threads in config.yaml), so the computer stays usable. A new scan or
+        another folder cancels the running job."""
+        self._gen += 1
+        gen, files = self._gen, list(self.files.values())
+        workers = max(1, int(self.cfg.get("background_threads", 2)))
+
+        def alive():
+            return gen == self._gen
 
         def run():
-            with ThreadPoolExecutor(max_workers=max(1, (os.cpu_count() or 2) - 1)) as pool:
-                for f in files:
-                    if gen != self._warm_gen:
+            todo = [f for f in files if f["w"] is None]
+            self.progress = {"sizes_left": len(todo), "thumbs_left": 0, "thumbs_total": 0}
+            with ThreadPoolExecutor(max_workers=workers + 2) as pool:  # header reads are cheap
+                batch = []
+                for f, wh in zip(todo, pool.map(lambda f: read_size(self.root / f["rel"]) if alive() else None, todo)):
+                    if not alive():
                         return
-                    if not self.thumb_path(f).exists():
-                        pool.submit(self.thumb, f)
+                    if self._set_size(f, wh):
+                        batch.append((f["key"], *wh))
+                    self.progress["sizes_left"] -= 1
+                    if len(batch) >= 500:
+                        self._store_sizes(batch)
+                        batch = []
+                self._store_sizes(batch)
+            if not alive():
+                return
+            todo = [f for f in files if not self.thumb_path(f).exists()]
+            self.progress.update(thumbs_left=len(todo), thumbs_total=len(todo))
+
+            def one(f):
+                if alive() and not self.thumb_path(f).exists():
+                    wh = make_thumb(self.root / f["rel"], self.thumb_path(f))
+                    if self._set_size(f, wh):
+                        self._store_sizes([(f["key"], *wh)])
+                self.progress["thumbs_left"] -= 1
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                slots = threading.Semaphore(workers * 2)  # submit lazily, so cancelling is quick
+                for f in todo:
+                    if not alive():
+                        break
+                    slots.acquire()
+                    pool.submit(one, f).add_done_callback(lambda _: slots.release())
+            if alive():
+                self.progress.update(thumbs_left=0)
+
         threading.Thread(target=run, daemon=True).start()
 
     # ------------------------------------------------------------ queries
@@ -223,9 +309,10 @@ class Library:
             node = nodes[p]
             node["total"] += node["n"]
             if p:
-                parent = nodes[p.rsplit("/", 1)[0] if "/" in p else ""]
-                parent["total"] += node["total"]
-                parent["children"].append(node)
+                parent = nodes.get(p.rsplit("/", 1)[0] if "/" in p else "")
+                if parent is not None:
+                    parent["total"] += node["total"]
+                    parent["children"].append(node)
         for node in nodes.values():
             node["children"].sort(key=lambda c: c["name"].lower())
         return nodes[""]
@@ -236,12 +323,25 @@ class Library:
             return [f for f in self.files.values() if f["folder"] == folder or f["folder"].startswith(pre)]
         return [f for f in self.files.values() if f["folder"] == folder]
 
+    @staticmethod
+    def gkey(f, words):
+        cache = f.setdefault("_g", {})
+        if words not in cache:
+            cache[words] = group_key(f["name"], words)
+        return cache[words]
+
     def search(self, folder="", recursive=False, q="", sort="name", group=None, words=1):
+        """Filtered and sorted file list. Cached, because paging asks for the same list again."""
+        res = sort in ("res_desc", "res_asc")
+        ck = (folder, recursive, q, sort, group, words, self.version, self.size_version if res else 0)
+        hit = self._cache.get(ck)
+        if hit is not None:
+            return hit
         fs = self.in_folder(folder, recursive)
         for word in q.lower().split():
             fs = [f for f in fs if word in f["rel"].lower()]
         if group is not None:
-            fs = [f for f in fs if group_key(f["name"], words) == group]
+            fs = [f for f in fs if self.gkey(f, words) == group]
         px = lambda f: f["w"] * f["h"] if f["w"] and f["h"] else None
         fs.sort(key=lambda f: f["rel"].lower())
         if sort == "newest":
@@ -253,13 +353,16 @@ class Library:
         elif sort == "res_asc":
             fs.sort(key=lambda f: (px(f) is None, px(f) or 0))
         elif sort == "group":
-            fs.sort(key=lambda f: (group_key(f["name"], words) == "", group_key(f["name"], words)))
+            fs.sort(key=lambda f: (self.gkey(f, words) == "", self.gkey(f, words)))
+        if len(self._cache) > 20:
+            self._cache.clear()
+        self._cache[ck] = fs
         return fs
 
     def groups(self, folder="", recursive=False, q="", words=1, min_size=2):
         counts = {}
         for f in self.search(folder, recursive, q):
-            k = group_key(f["name"], words)
+            k = self.gkey(f, words)
             counts[k] = counts.get(k, 0) + 1
         nokey = counts.pop("", 0)
         out = [{"key": k, "n": n} for k, n in counts.items() if n >= min_size]
