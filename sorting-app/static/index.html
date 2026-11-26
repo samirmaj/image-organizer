@@ -49,8 +49,12 @@
 
   .crumbs { padding: 6px 10px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .crumbs .chip { border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; padding: 0 8px; cursor: pointer; }
-  .grid { display: grid; gap: 4px; padding: 4px; grid-template-columns: repeat(auto-fill, minmax(var(--size), 1fr)); }
-  .tile { margin: 0; aspect-ratio: 3 / 4; background: #0e0f11; position: relative; cursor: pointer; overflow: hidden; }
+  /* Only the rows on screen (plus two above and below) exist in the page; .vgrid has the
+     height of all rows, so the scrollbar still covers the whole folder. */
+  .vgrid { position: relative; }
+  .grid { display: grid; gap: 4px; padding: 4px; will-change: transform; }
+  .tile { margin: 0; background: #0e0f11; position: relative; cursor: pointer; overflow: hidden; }
+  .tile.empty { cursor: default; }
   .tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
   .tile:hover { outline: 2px solid var(--accent); }
   .tile.sel { outline: 3px solid var(--accent); outline-offset: -3px; }
@@ -60,7 +64,6 @@
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tile .cap .f { color: var(--muted); }
   .ph { position: absolute; inset: 0; display: grid; place-items: center; color: #c66; font-size: 12px; text-align: center; padding: 6px; word-break: break-all; }
-  .sentinel { height: 1px; }
   .status { color: var(--muted); padding: 16px; text-align: center; }
 
   .selbar { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; display: flex; gap: 8px;
@@ -123,7 +126,9 @@
     <input type="checkbox" x-model="recursive" @change="saveOpt('recursive', recursive ? 1 : 0); reloadAll()"> subfolders</label>
   <label><input type="checkbox" x-model="names" @change="saveOpt('names', names ? 1 : 0)"> names</label>
   <label>size <input type="range" min="80" max="320" step="10" x-model.number="size" @change="saveOpt('size', size)"></label>
-  <span class="count" x-show="workText()" x-text="workText()" title="Done in the background on a few CPU cores (background_threads in config.yaml). The app is usable meanwhile."></span>
+  <span class="count" x-show="workText()" x-text="workText()" title="Made in the background on one CPU core at the lowest priority (background_threads in config.yaml). It waits while you browse. The images on screen are always made right away."></span>
+  <button x-show="workText()" @click="togglePause()" x-text="progress && progress.paused ? '▶ Resume' : '❚❚ Pause'"
+          :title="progress && progress.paused ? 'Continue making thumbnails in the background' : 'Stop making thumbnails in the background (the images on screen are still made). Remembered after a restart.'"></button>
   <span class="spacer"></span>
   <button @click="undo()" :disabled="!lastMove || busy" :title="lastMove ? `Undo: ${lastMove.n} moved to ${lastMove.dest || '(top folder)'} at ${lastMove.time}` : 'Nothing to undo'">↶ Undo move</button>
   <button @click="rescan()" :disabled="busy" title="Read the folder again (after changes made outside the app)" x-text="busy === 'scan' ? 'Scanning…' : 'Rescan'"></button>
@@ -183,20 +188,22 @@
     <span class="chip" x-show="group !== null" @click="setGroup(null)" x-text="`group: ${group || '(none)'} ✕`" title="Show all images again"></span>
     <span class="note" :class="noteKind" x-text="note"></span>
   </div>
-  <section class="grid" :style="`--size:${size}px`">
-    <template x-for="(it, i) in items" :key="it.id">
-      <figure class="tile" :class="{ sel: sel[it.id] }" :title="it.id" draggable="true"
-              @dragstart="dragStart($event, it)"
-              @click="tileClick($event, i)" @mousedown="$event.shiftKey && $event.preventDefault()" @mouseenter="hover = i">
-        <template x-if="sel[it.id]"><span class="check">✓</span></template>
-        <img loading="lazy" :src="thumbUrl(it)" :alt="it.name" draggable="false" @error="it.broken = true" x-show="!it.broken">
-        <template x-if="it.broken"><div class="ph"><div>no preview<br><span x-text="it.name"></span></div></div></template>
-        <div class="cap" x-show="names"><span x-text="it.name"></span>
-          <span class="f" x-show="recursive && it.folder !== folder" x-text="' · ' + (it.folder || '(top)')"></span></div>
+  <div class="vgrid" x-ref="vgrid" :style="`height:${gridHeight()}px`">
+  <section class="grid" :style="`grid-template-columns:repeat(${lay.cols}, 1fr); grid-auto-rows:${lay.tileH}px; transform:translateY(${lay.top}px)`">
+    <template x-for="t in tiles()" :key="t.i">
+      <figure class="tile" :class="{ sel: t.it && sel[t.it.id], empty: !t.it }" :title="t.it ? t.it.id : ''" :draggable="!!t.it"
+              @dragstart="t.it && dragStart($event, t.it)"
+              @click="t.it && tileClick($event, t.i)" @mousedown="$event.shiftKey && $event.preventDefault()" @mouseenter="hover = t.i">
+        <template x-if="t.it && sel[t.it.id]"><span class="check">✓</span></template>
+        <template x-if="t.it && !t.it.broken">
+          <img decoding="async" :src="thumbUrl(t.it)" :alt="t.it.name" draggable="false" @error="t.it.broken = true"></template>
+        <template x-if="t.it && t.it.broken"><div class="ph"><div>no preview<br><span x-text="t.it.name"></span></div></div></template>
+        <template x-if="t.it && names"><div class="cap"><span x-text="t.it.name"></span>
+          <span class="f" x-show="recursive && t.it.folder !== folder" x-text="' · ' + (t.it.folder || '(top)')"></span></div></template>
       </figure>
     </template>
   </section>
-  <div class="sentinel" x-ref="sentinel"></div>
+  </div>
   <div class="status" x-show="loading">Loading…</div>
   <div class="status" x-show="!loading && total === 0">No images here.</div>
 </div>
@@ -303,12 +310,16 @@
 <script>
 const enc = encodeURIComponent;
 let preloaded = [];
+const PAGE = 200;          // images per request
+let pages = new Map();     // page number -> request, for the current list
+let scrollFrame = 0;
 const opt = (k, d) => { try { const v = localStorage.getItem('sorter.' + k); return v === null ? d : v; } catch (e) { return d; } };
 
 function app() {
   return {
     root: '', tree: null, progress: null, pollTimer: null, open: {}, folder: '', recursive: false, q: '', sort: 'name', names: false, size: 160,
     items: [], total: 0, loading: false, gen: 0, hover: null,
+    lay: { cols: 1, tileH: 0, rowH: 1, start: 0, end: 0, top: 0 },
     sel: {}, nSel: 0, anchor: null, recent: [], lastMove: null, busy: false,
     note: '', noteKind: '', toast: { text: '', err: false, undo: false }, toastTimer: null,
     tab: 'folders', groups: { groups: [], singles: 0, no_words: 0 }, group: null, words: 1, minGroup: 2,
@@ -322,7 +333,10 @@ function app() {
       try { this.recent = JSON.parse(opt('recent', '[]')); } catch (e) { this.recent = []; }
       try { this.open = JSON.parse(opt('open', '{}')); } catch (e) { this.open = {}; }
       new ResizeObserver(() => document.body.style.setProperty('--hdr', this.$refs.hdr.offsetHeight + 'px')).observe(this.$refs.hdr);
-      new IntersectionObserver(es => { if (es[0].isIntersecting) this.loadMore(); }, { rootMargin: '1200px' }).observe(this.$refs.sentinel);
+      addEventListener('scroll', () => { if (!scrollFrame) scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; this.layout(); }); }, { passive: true });
+      addEventListener('resize', () => this.layout());
+      new ResizeObserver(() => this.layout()).observe(this.$refs.vgrid);
+      this.$watch('size', () => this.$nextTick(() => this.layout()));
       await this.loadState();
       this.folder = opt('folder:' + this.root, '');
       if (!this.findNode(this.folder)) this.folder = '';
@@ -350,9 +364,14 @@ function app() {
     workText() {
       const p = this.progress, f = n => n.toLocaleString();
       if (!p) return '';
-      if (p.sizes_left > 0) return `reading image sizes… ${f(p.sizes_left)} left`;
-      if (p.thumbs_left > 0) return `thumbnails ${f(p.thumbs_total - p.thumbs_left)} / ${f(p.thumbs_total)}`;
+      const paused = p.paused ? ' (paused)' : '';
+      if (p.sizes_left > 0) return `reading image sizes… ${f(p.sizes_left)} left` + paused;
+      if (p.thumbs_left > 0) return `thumbnails ${f(p.thumbs_total - p.thumbs_left)} / ${f(p.thumbs_total)}` + paused;
       return '';
+    },
+    async togglePause() {
+      try { this.progress = await this.api('/api/pause', { paused: !this.progress.paused }); }
+      catch (e) { this.flash(e.message, true); }
     },
     thumbUrl(it) { return `/thumb?id=${enc(it.id)}&v=${it.v}`; },
     fullUrl(it) { return `/full?id=${enc(it.id)}&v=${it.v}`; },
@@ -426,19 +445,53 @@ function app() {
     body() { return { folder: this.folder, recursive: this.recursive, q: this.q, sort: this.sort, group: this.group, words: this.words }; },
     async reloadAll() { await this.reload(); if (this.tab === 'groups') this.loadGroups(); },
     async reload() {
-      this.gen++; this.items = []; this.total = 0; this.loading = false; this.closeView();
-      await this.loadMore(true);
+      this.gen++; pages = new Map(); this.items = []; this.total = 0; this.closeView();
+      scrollTo(0, 0);
+      this.loading = true;
+      await this.ensure(0, 1);
+      this.loading = false;
+      await this.$nextTick(); this.layout();
     },
-    async loadMore(force) {
-      if (this.loading || (!force && this.items.length >= this.total)) return;
-      const gen = this.gen; this.loading = true;
-      let d;
-      try { d = await this.api('/api/list', { ...this.body(), offset: this.items.length, limit: 200 }); }
-      catch (e) { this.loading = false; this.flash(e.message, true); return; }
-      if (gen !== this.gen) return;  // folder or sort changed meanwhile
-      this.items.push(...d.items); this.total = d.total; this.loading = false;
-      await this.$nextTick();
-      if (this.items.length < this.total && this.$refs.sentinel.getBoundingClientRect().top < innerHeight + 1200) this.loadMore();
+    // Which rows are on screen. Only those tiles are rendered; their images are fetched
+    // page by page as you scroll, so a folder of 100,000 images costs as much as one of 200.
+    layout() {
+      const el = this.$refs.vgrid;
+      if (!el) return;
+      const gap = 4, W = el.clientWidth - 2 * gap;
+      if (W <= 0) return;
+      const cols = Math.max(1, Math.floor((W + gap) / (this.size + gap)));
+      const tileH = Math.round((W - (cols - 1) * gap) / cols * 4 / 3), rowH = tileH + gap;
+      const top0 = el.getBoundingClientRect().top + gap;  // first row, relative to the window
+      const r0 = Math.max(0, Math.floor(-top0 / rowH) - 2);
+      const r1 = Math.max(r0, Math.ceil((innerHeight - top0) / rowH) + 2);
+      const start = Math.min(this.total, r0 * cols), end = Math.min(this.total, r1 * cols);
+      const l = this.lay;
+      if (l.cols !== cols || l.tileH !== tileH || l.start !== start || l.end !== end)
+        Object.assign(this.lay, { cols, tileH, rowH, start, end, top: r0 * rowH });
+      this.ensure(start, end + (end - start));  // one screen ahead
+    },
+    gridHeight() {
+      const rows = Math.ceil(this.total / this.lay.cols);
+      return rows ? rows * this.lay.rowH + 4 : 0;
+    },
+    tiles() {
+      const out = [];
+      for (let i = this.lay.start; i < this.lay.end; i++) out.push({ i, it: this.items[i] });
+      return out;
+    },
+    // Load the pages that hold images a..b-1 (if not loaded or loading already).
+    ensure(a, b) {
+      const gen = this.gen, jobs = [];
+      b = Math.max(a + 1, this.total ? Math.min(b, this.total) : b);
+      for (let p = Math.floor(a / PAGE); p <= Math.floor((b - 1) / PAGE); p++) {
+        if (!pages.has(p)) pages.set(p, this.api('/api/list', { ...this.body(), offset: p * PAGE, limit: PAGE }).then(d => {
+          if (gen !== this.gen) return;
+          if (d.total !== this.total) { this.total = d.total; this.items.length = d.total; this.$nextTick(() => this.layout()); }
+          d.items.forEach((it, k) => { this.items[p * PAGE + k] = it; });
+        }).catch(e => { if (gen === this.gen) { pages.delete(p); this.flash(e.message, true); } }));
+        jobs.push(pages.get(p));
+      }
+      return Promise.all(jobs);
     },
     async rescan() {
       this.busy = 'scan';
@@ -465,12 +518,13 @@ function app() {
     },
 
     // ---- selection: Ctrl-click one, Shift-click a range, Ctrl+A all, Esc none
-    tileClick(e, i) {
+    async tileClick(e, i) {
       const id = this.items[i].id;
       if (e.ctrlKey || e.metaKey) { this.setSel(id, !this.sel[id]); this.anchor = i; }
       else if (e.shiftKey && this.anchor !== null) {
         const [a, b] = this.anchor < i ? [this.anchor, i] : [i, this.anchor];
-        for (let k = a; k <= b; k++) this.setSel(this.items[k].id, true);
+        await this.ensure(a, b + 1);  // the range may reach images not loaded yet
+        for (let k = a; k <= b; k++) if (this.items[k]) this.setSel(this.items[k].id, true);
       } else if (e.shiftKey) { this.setSel(id, true); this.anchor = i; }
       else this.openView(i);
     },
@@ -531,12 +585,18 @@ function app() {
       this.busy = false;
     },
     async reloadKeepScroll() {  // after a move: same view, the moved images gone
-      const y = scrollY, n = Math.max(this.items.length, 200);
-      this.gen++; const gen = this.gen;
-      const d = await this.api('/api/list', { ...this.body(), offset: 0, limit: n });
-      if (gen !== this.gen) return;
-      this.items = d.items; this.total = d.total; this.anchor = null;
-      await this.$nextTick(); scrollTo(0, y);
+      const gen = ++this.gen, a = this.lay.start, b = Math.max(this.lay.end, a + 1);
+      const first = Math.floor(a / PAGE), last = Math.floor((b - 1) / PAGE), fetched = [];
+      try {
+        for (let p = first; p <= last; p++) fetched.push(this.api('/api/list', { ...this.body(), offset: p * PAGE, limit: PAGE }));
+        const ds = await Promise.all(fetched);
+        if (gen !== this.gen) return;
+        const items = new Array(ds[0].total);
+        ds.forEach((d, k) => d.items.forEach((it, j) => { items[(first + k) * PAGE + j] = it; }));
+        pages = new Map(ds.map((d, k) => [first + k, Promise.resolve()]));
+        this.items = items; this.total = ds[0].total; this.anchor = null;
+      } catch (e) { this.flash(e.message, true); return; }
+      await this.$nextTick(); this.layout();
     },
 
     // ---- enlarged view
@@ -546,7 +606,8 @@ function app() {
       const it = this.items[i];
       const d = await this.api('/api/info?id=' + enc(it.id)).catch(() => null);
       if (this.cur === i) this.detail = d;
-      preloaded = [i + 1, i - 1, i + 2, i - 2].map(k => this.items[k]).filter(Boolean).map(n => {
+      // only the next and the previous image are loaded in advance
+      preloaded = [i + 1, i - 1].map(k => this.items[k]).filter(Boolean).map(n => {
         const im = new Image(); im.src = this.baseUrl(n); im.decode().catch(() => {}); return im;
       });
     },
@@ -633,8 +694,8 @@ function app() {
     async step(n) {
       const i = this.cur + n;
       if (i < 0 || i >= this.total) return;
-      if (i >= this.items.length) await this.loadMore();
-      if (i < this.items.length) this.openView(i);
+      if (!this.items[i]) await this.ensure(i, i + 1);
+      if (this.items[i]) this.openView(i);
     },
 
     onKey(e) {

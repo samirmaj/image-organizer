@@ -4,7 +4,7 @@ image_root: C:\Users\Administrator\Pictures
 data_dir: ./appdata            # thumbnail cache, screen-size copies, move log, undo history
 port: 8001                     # 8001, so it can run next to image-app (8000)
 display_size: 1600             # the enlarged view shows a copy with this long side; the original loads when you zoom in
-background_threads: 2          # CPU cores used to make thumbnails in the background (more = faster, but the PC gets busier)
-thumb_threads: 3               # thumbnails made at once for the images on screen
+background_threads: 1          # CPU cores for making thumbnails in the background; it pauses while you browse
+thumb_threads: 2               # thumbnails made at once for the images on screen
 image_extensions: [.jpg, .jpeg, .png, .webp, .jfif, .gif, .bmp, .tif, .tiff]
 skip_folders: [appdata, $recycle.bin, node_modules]   # never shown (folders starting with "." are skipped too)

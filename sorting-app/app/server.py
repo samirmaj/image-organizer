@@ -27,18 +27,25 @@ OPEN_BROWSER = False  # set by run.py
 LONG_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
 
 
-def start_root():
+def load_state():
     try:
-        last = json.loads(STATE.read_text(encoding="utf-8")).get("root")
-        if last and os.path.isdir(last):
-            return last
+        return json.loads(STATE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        pass
-    return cfg["image_root"]
+        return {}
+
+
+def save_state(**changes):
+    STATE.write_text(json.dumps({**load_state(), **changes}), encoding="utf-8")
+
+
+def start_root():
+    last = load_state().get("root")
+    return last if last and os.path.isdir(last) else cfg["image_root"]
 
 
 @asynccontextmanager
 async def lifespan(app):
+    lib.paused = bool(load_state().get("paused"))
     r = lib.set_root(start_root())
     print(f"{r['root']}: {r['images']} images in {r['folders']} folders")
     if OPEN_BROWSER:
@@ -70,13 +77,25 @@ def home():
 @app.get("/api/state")
 def state():
     return {"root": str(lib.root), "images": len(lib.files), "last_move": mover.last(),
-            "tree": lib.tree(), "progress": lib.progress}
+            "tree": lib.tree(), "progress": progress_info()}
+
+
+def progress_info():
+    return {**lib.progress, "paused": lib.paused}
 
 
 @app.get("/api/progress")
 def progress():
     """Background work: pixel sizes still to read, thumbnails still to make."""
-    return lib.progress
+    return progress_info()
+
+
+@app.post("/api/pause")
+def pause(body: dict = Body(...)):
+    """Pause or resume the background thumbnails (remembered for the next start)."""
+    lib.paused = bool(body.get("paused"))
+    save_state(paused=lib.paused)
+    return progress_info()
 
 
 @app.post("/api/root")
@@ -85,7 +104,7 @@ def set_root(body: dict = Body(...)):
         r = lib.set_root(body["path"].strip().strip('"'))
     except ValueError as e:
         bad(e)
-    STATE.write_text(json.dumps({"root": r["root"]}), encoding="utf-8")
+    save_state(root=r["root"])
     return r
 
 
@@ -102,8 +121,10 @@ def item(f):
 
 @app.post("/api/list")
 def list_images(body: dict = Body(...)):
+    lib.touch()
     fs = lib.search(body.get("folder", ""), body.get("recursive", False), body.get("q", ""),
-                    body.get("sort", "name"), body.get("group"), body.get("words", 1))
+                    body.get("sort", "name"), body.get("group"), body.get("words", 1),
+                    fresh=not body.get("offset"))
     if body.get("ids_only"):  # "select all"
         return {"ids": [f["rel"] for f in fs]}
     offset, limit = body.get("offset", 0), body.get("limit", 200)
@@ -128,7 +149,7 @@ def thumb(id: str):
     p = lib.thumb(get_file(id))
     if not p:
         raise HTTPException(404)
-    return FileResponse(p, media_type="image/webp", headers=LONG_CACHE)
+    return FileResponse(p, headers=LONG_CACHE)
 
 
 @app.get("/full")

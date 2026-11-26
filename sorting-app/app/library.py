@@ -9,12 +9,28 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
 THUMB_SIZE = 320  # long side, px
+
+
+def lowest_priority():
+    """Run the calling thread at the lowest CPU priority, so Windows (or Linux) gives the CPU
+    to everything else first: the browser, other programs and the images you are looking at.
+    The background job then only uses CPU time that nothing else wants."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.SetThreadPriority(k32.GetCurrentThread(), -15)  # THREAD_PRIORITY_IDLE
+        elif hasattr(os, "setpriority"):
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)  # Linux: per thread
+    except Exception:
+        pass
 
 
 def file_key(name, size, mtime_ns):
@@ -34,7 +50,8 @@ def read_size(path):
 
 
 def make_thumb(path, out):
-    """Write the WebP thumbnail. Returns the image's displayed (w, h), or None on failure."""
+    """Write the JPEG thumbnail (JPEG encodes far faster than WebP, which used to be most of
+    the work). Returns the image's displayed (w, h), or None on failure."""
     try:
         with Image.open(path) as im:
             w, h = im.size
@@ -42,12 +59,16 @@ def make_thumb(path, out):
                 w, h = h, w
             im.draft("RGB", (THUMB_SIZE, THUMB_SIZE))
             im = ImageOps.exif_transpose(im)
-            alpha = "A" in im.mode or "transparency" in im.info
-            im = im.convert("RGBA" if alpha else "RGB")
-            im.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
+            if "A" in im.mode or "transparency" in im.info:  # JPEG has no transparency:
+                im = im.convert("RGBA")                       # put it on the tile colour
+                bg = Image.new("RGB", im.size, (14, 15, 17))
+                bg.paste(im, mask=im.getchannel("A"))
+                im = bg
+            im = im.convert("RGB")
+            im.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.BILINEAR, reducing_gap=2.0)
             out.parent.mkdir(parents=True, exist_ok=True)
             tmp = out.with_suffix(".tmp")
-            im.save(tmp, "WEBP", quality=80)
+            im.save(tmp, "JPEG", quality=82)
             os.replace(tmp, out)
         return w, h
     except Exception:
@@ -62,10 +83,10 @@ def make_display(path, out, size):
                 return False
             im.draft("RGB", (size, size))
             im = ImageOps.exif_transpose(im).convert("RGB")
-            im.thumbnail((size, size), Image.LANCZOS)
+            im.thumbnail((size, size), Image.BICUBIC, reducing_gap=2.0)
             out.parent.mkdir(parents=True, exist_ok=True)
             tmp = out.with_suffix(".tmp")
-            im.save(tmp, "JPEG", quality=88, optimize=True)
+            im.save(tmp, "JPEG", quality=88)
             os.replace(tmp, out)
         return True
     except Exception:
@@ -113,7 +134,12 @@ class Library:
         self.progress = {"sizes_left": 0, "thumbs_left": 0, "thumbs_total": 0}
         # On-demand thumbnails (the images on screen) - at most this many at once,
         # so fast scrolling does not start dozens of decodes in parallel.
-        self._ondemand = threading.Semaphore(cfg.get("thumb_threads", 3))
+        self._ondemand = threading.Semaphore(cfg.get("thumb_threads", 2))
+        # Screen-size copies for the enlarged view (about 0.2 s of CPU each): at most 2 at once,
+        # so holding the arrow key does not start a dozen of them in parallel.
+        self._displays = threading.Semaphore(2)
+        self.active_until = 0.0  # the background job waits while the user is browsing
+        self.paused = False      # ... and while "Pause" is on in the header
 
     # ------------------------------------------------------------ paths
 
@@ -129,7 +155,15 @@ class Library:
         return "" if r == "." else r
 
     def thumb_path(self, f):
-        return self.data_dir / "thumbs" / f["key"][:2] / f"{f['key']}.webp"
+        return self.data_dir / "thumbs" / f["key"][:2] / f"{f['key']}.jpg"
+
+    def has_thumb(self, f):
+        """The thumbnail if it exists - also one in the older WebP format."""
+        p = self.thumb_path(f)
+        if p.exists():
+            return p
+        old = p.with_suffix(".webp")
+        return old if old.exists() else None
 
     def display_path(self, f):
         return self.data_dir / "display" / str(self.cfg["display_size"]) / f["key"][:2] / f"{f['key']}.jpg"
@@ -216,18 +250,26 @@ class Library:
 
     # ------------------------------------------------------------ thumbnails
 
+    def touch(self, seconds=3.0):
+        """The user is doing something: keep the background job paused for a moment."""
+        self.active_until = max(self.active_until, time.monotonic() + seconds)
+
     def thumb(self, f):
+        self.touch()
+        p = self.has_thumb(f)
+        if p:
+            return p
         p = self.thumb_path(f)
-        if not p.exists():
-            with self._ondemand:
-                if not p.exists():
-                    wh = make_thumb(self.root / f["rel"], p)
-                    if self._set_size(f, wh):
-                        self._store_sizes([(f["key"], *wh)])
+        with self._ondemand:
+            if not p.exists():
+                wh = make_thumb(self.root / f["rel"], p)
+                if self._set_size(f, wh):
+                    self._store_sizes([(f["key"], *wh)])
         return p if p.exists() else None
 
     def display(self, f):
         """Screen-size copy for images larger than display_size, else None (use the original)."""
+        self.touch()
         size = self.cfg["display_size"]
         if f["w"] is None:
             wh = read_size(self.root / f["rel"])
@@ -237,7 +279,9 @@ class Library:
             return None
         p = self.display_path(f)
         if not p.exists():
-            make_display(self.root / f["rel"], p, size)
+            with self._displays:
+                if not p.exists():
+                    make_display(self.root / f["rel"], p, size)
         return p if p.exists() else None
 
     def stop_background(self):
@@ -246,22 +290,32 @@ class Library:
         self._gen += 1
 
     def start_background(self):
-        """Read unknown pixel sizes, then make missing thumbnails - on a few threads only
-        (background_threads in config.yaml), so the computer stays usable. A new scan or
-        another folder cancels the running job."""
+        """Read unknown pixel sizes, then make missing thumbnails, on background_threads
+        threads (default 1) running at the lowest CPU priority. It waits while the user is
+        browsing (the images on screen are made on demand meanwhile) and while it is paused,
+        and resumes after a few quiet seconds. A new scan, another folder or closing the app
+        cancels it."""
         self._gen += 1
         gen, files = self._gen, list(self.files.values())
-        workers = max(1, int(self.cfg.get("background_threads", 2)))
+        workers = max(1, int(self.cfg.get("background_threads", 1)))
 
         def alive():
             return gen == self._gen
 
+        def wait():
+            while alive() and (self.paused or time.monotonic() < self.active_until):
+                time.sleep(0.5)
+
         def run():
+            lowest_priority()
             todo = [f for f in files if f["w"] is None]
             self.progress = {"sizes_left": len(todo), "thumbs_left": 0, "thumbs_total": 0}
-            with ThreadPoolExecutor(max_workers=workers + 2) as pool:  # header reads are cheap
+            with ThreadPoolExecutor(max_workers=workers, initializer=lowest_priority) as pool:
                 batch = []
-                for f, wh in zip(todo, pool.map(lambda f: read_size(self.root / f["rel"]) if alive() else None, todo)):
+                def size_of(f):
+                    wait()
+                    return read_size(self.root / f["rel"]) if alive() else None
+                for f, wh in zip(todo, pool.map(size_of, todo)):
                     if not alive():
                         return
                     if self._set_size(f, wh):
@@ -273,17 +327,18 @@ class Library:
                 self._store_sizes(batch)
             if not alive():
                 return
-            todo = [f for f in files if not self.thumb_path(f).exists()]
+            todo = [f for f in files if not self.has_thumb(f)]
             self.progress.update(thumbs_left=len(todo), thumbs_total=len(todo))
 
             def one(f):
-                if alive() and not self.thumb_path(f).exists():
+                wait()
+                if alive() and not self.has_thumb(f):
                     wh = make_thumb(self.root / f["rel"], self.thumb_path(f))
                     if self._set_size(f, wh):
                         self._store_sizes([(f["key"], *wh)])
                 self.progress["thumbs_left"] -= 1
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            with ThreadPoolExecutor(max_workers=workers, initializer=lowest_priority) as pool:
                 slots = threading.Semaphore(workers * 2)  # submit lazily, so cancelling is quick
                 for f in todo:
                     if not alive():
@@ -330,11 +385,17 @@ class Library:
             cache[words] = group_key(f["name"], words)
         return cache[words]
 
-    def search(self, folder="", recursive=False, q="", sort="name", group=None, words=1):
-        """Filtered and sorted file list. Cached, because paging asks for the same list again."""
+    def search(self, folder="", recursive=False, q="", sort="name", group=None, words=1, fresh=True):
+        """Filtered and sorted file list. Cached, because paging asks for the same list again.
+        Sorting by resolution changes while pixel sizes come in; it is sorted again only for
+        the first page (fresh=True), so the later pages of a view keep the same order and
+        100,000 images are not sorted again for every page."""
         res = sort in ("res_desc", "res_asc")
-        ck = (folder, recursive, q, sort, group, words, self.version, self.size_version if res else 0)
+        base = (folder, recursive, q, sort, group, words, self.version)
+        ck = base + ((self.size_version if res else 0),)
         hit = self._cache.get(ck)
+        if hit is None and res and not fresh:
+            hit = self._cache.get(("last",) + base)
         if hit is not None:
             return hit
         fs = self.in_folder(folder, recursive)
@@ -357,6 +418,8 @@ class Library:
         if len(self._cache) > 20:
             self._cache.clear()
         self._cache[ck] = fs
+        if res:
+            self._cache[("last",) + base] = fs
         return fs
 
     def groups(self, folder="", recursive=False, q="", words=1, min_size=2):

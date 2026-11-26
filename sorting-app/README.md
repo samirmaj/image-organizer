@@ -76,12 +76,25 @@ sorting-app/
                      thumbs/, display/ (screen-size copies), moves.log, undo.json, state.json
 ```
 
-**Large folders.** Opening a folder only lists the files, which takes about a second for
-10,000 images. Pixel sizes and thumbnails are then made in the background. The header shows
-"thumbnails 1,234 / 10,000" until that's done, and the app is usable meanwhile; the images
-on screen are always made first. The background work uses `background_threads` CPU cores
-(default 2, in `config.yaml`), and it stops as soon as you close the app or open another
-folder. Everything made so far is kept, so the next start is quick.
+**Large folders (tested with 100,000 images).** Opening a folder only lists the files.
+Pixel sizes and thumbnails are then made in the background. The header shows
+"thumbnails 1,234 / 100,000" until that's done, and the app is usable meanwhile; the images
+on screen are always made right away. To keep the computer usable, the background work:
+
+- runs on `background_threads` CPU cores (default 1, in `config.yaml`) at the lowest
+  priority, so Windows gives the CPU to every other program first,
+- waits while you are scrolling or looking at images, and continues a few seconds later,
+- can be stopped with **❚❚ Pause** in the header (and started again with **▶ Resume**);
+  the app remembers this after a restart,
+- stops when you close the app or open another folder. Everything made so far is kept, so
+  the next start is quick.
+
+Making all thumbnails for 100,000 images takes roughly half an hour to an hour of one core.
+
+The grid only puts the rows you can see into the page, and loads the file list in pieces
+of 200 as you scroll, so a folder of 100,000 images scrolls like one of 200. The enlarged
+view loads the next and previous image in advance and makes at most 2 screen-size copies at
+once.
 
 Thumbnails are stored under a key made of the file name, size and date, so moving a file
 does not make a new thumbnail. The app only ever moves files and creates folders. It never
