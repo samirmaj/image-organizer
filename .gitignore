@@ -1,0 +1,5 @@
+# Python virtual environment, logs and local Claude Code settings: stay on this computer only
+.venv/
+logs/
+.claude/
+__pycache__/
