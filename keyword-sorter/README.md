@@ -8,18 +8,85 @@ Nothing is moved until you run `apply`, and every `apply` can be reversed with `
 
 ## Setup
 
-Copy `sortimages.py` into your image folder (or anywhere, and pass the folder
-path). Open a terminal in the image folder: in Explorer, click the address bar,
-type `cmd` and press Enter.
+Open a terminal in the `image-organizer` folder (in Explorer, click the
+address bar, type `cmd` and press Enter) and run the script from there:
 
-## The four steps
+```
+py keyword-sorter\sortimages.py scan C:\Users\Administrator\Documents\image-collection
+```
+
+**Where the files go.** If there is a `logs` folder next to `keyword-sorter`
+(as in this project), `keywords.json`, the reports, the plan and the undo logs
+are written there. `logs/` is in `.gitignore`, so none of it is ever uploaded
+to GitHub. Without a `logs` folder they go into the image folder, as before.
+`--data <folder>` picks another place.
+
+`keywords.json` remembers the image folder, so after the first run you can
+leave the folder path out: `py keyword-sorter\sortimages.py plan`.
+
+## The steps
 
 | Step | Command | What it does |
 |---|---|---|
-| 1 | `py sortimages.py scan` | Counts words in all filenames. Creates `keywords.json` (starter rules), `keyword_report.csv` (every recurring filename word and word pair, with how many files and folders have it) and `folder_report.csv` (your existing folders with image counts). |
-| 2 | `py sortimages.py plan` | Preview only. Decides a destination for every image and writes `sort_plan.csv`. Prints a summary per folder. |
-| 3 | `py sortimages.py apply` | Moves the files as written in `sort_plan.csv`, after you type `yes`. Writes `undo_log_<time>.csv`. |
-| 4 | `py sortimages.py undo` | Moves everything from the most recent apply back. Run it again to undo the one before. |
+| 1 | `scan` | Counts words in the filenames of everything not sorted yet. Creates `keywords.json` (starter rules) the first time, `keyword_report.csv` (every recurring filename word and word pair, with how many files and folders have it) and `folder_report.csv`. |
+| 2 | `learn` | Goes through the best suggested words one by one and asks what each is. Every answer becomes a rule. See below. |
+| 3 | `plan` | Preview only. Decides a destination for every image in `_to sort` (and anything new) and writes `sort_plan.csv`. Prints a summary per folder. |
+| 4 | `apply` | Moves the files as written in `sort_plan.csv`, after you type `yes`. Writes `undo_log_<time>.csv`. |
+| 5 | `undo` | Moves everything from the most recent apply back. Run it again to undo the one before. |
+
+`update-rules` adds the built-in rules of a newer version of the script to
+your `keywords.json`; your own rules stay. A copy of the old file is kept.
+
+A round after the first one is: `learn`, `plan`, `apply`, `scan` (to refresh
+the counts), and again.
+
+## Turning suggestions into rules (`learn`)
+
+`learn` reads the counts in `keyword_report.csv`; it does not scan the images
+again. It shows one word at a time, the most useful first:
+
+```
+[312 left]  massimo dutti   (267 files in 28 folders)
+    e.g. avif/avivi/001-massimo-dutti-reversible-suede-napa-jacket.jpg
+    what is it? b
+    match both terms (massimo / dutti) on their own too? y/n [n = only 'dutti'] y
+    -> fashion/brands/Massimo Dutti: massimo dutti, massimo, dutti
+```
+
+| Answer | Meaning | Folder |
+|---|---|---|
+| `p` | person | `people/<Name>` |
+| `b` | brand | `fashion/brands/<Name>` |
+| `e` | editorial / magazine | `fashion/editorial/<Name>` |
+| `w` | street style / fashion week | `fashion/street style/<Name>` |
+| `i` | fashion item without a brand | `fashion/fashion misc` |
+| `s` | social media | `fashion/social media` |
+| `g` | AI generated | `fashion/generated` |
+| `c` | collage | `fashion/collages` |
+| `m` | movie still | `misc/screenshots/movies` |
+| `x` | other screenshot | `misc/screenshots` |
+| `f <folder>` | any other folder, e.g. `f misc/wallpapers` | |
+| Enter | skip for now (it comes back next time) | |
+| `n` | never suggest this word again | |
+| `u` | undo the last answer | |
+| `q` | save and quit | |
+
+- Type a name after the letter to choose the folder name: `b ASOS`, or
+  `i Leather Jacket` for `fashion/fashion misc/Leather Jacket`.
+- **Two-word names** ask "match both terms?". `y`: each word alone matches too
+  (right for `massimo dutti`). `n`: only the second word alone, so
+  `olivia palermo` matches `palermo` but `olivia` does not catch Olivia Wilde.
+  `1` keeps only the first word, `0` only the full name.
+- **What is suggested.** Words a rule already catches, words you answered `n`
+  to, and words of 3 letters or less (`oip`) are left out, as are common words
+  like `black` or `product`. Word pairs that nearly always appear together
+  (`massimo dutti`, `olivia palermo`) come first, before their single words.
+  After each answer the list is worked out again, so the next best word moves
+  up.
+- Everything is saved after every answer, so you can stop any time.
+  `keywords_backup_<time>.json` is a copy from before the session and
+  `learn_log.csv` lists every answer.
+- `learn --show 50` only lists the next 50 suggestions.
 
 ## Subfolders
 
@@ -30,10 +97,14 @@ Add `--top-only` to look only at images directly in the folder.
   is matched on the folders it sits in, innermost first. So
   `Alexa Chung/2019/IMG_0001.jpg` goes to `people/Alexa Chung/2019`: the
   subfolders below the matched folder are kept.
-- **Already sorted images stay put.** An image inside a rule's destination
-  folder, or inside any subfolder you made there (like
-  `fashion/brands/Zara/handsorted`), is left alone. Add `--resort` to `plan` to
-  re-check those too.
+- **Only what is unsorted is looked at.** The top folders your rules sort
+  into (`people`, `fashion`, `misc`) are not even opened by `plan` and `scan`,
+  so a rule that already did its job costs no time, and the rule stays to
+  catch new images later. Folders you made there by hand (like
+  `people/Some Name`) are safe. Add `--resort` to `plan`, or `--all` to
+  `scan`, to include them.
+- **`_trash` is never touched.** Folders in `skip_folders` in `keywords.json`
+  are skipped by every step.
 - **Leftovers keep their folder.** An image with no keyword that sits in a
   subfolder, like `Paris 2019/IMG_10.jpg`, moves to `_to sort/Paris 2019`, so
   photos that belonged together stay together.
@@ -55,14 +126,16 @@ Add `--top-only` to look only at images directly in the folder.
 ```
 
 - Each rule is `"destination folder": [keywords]`. The **first matching rule wins**,
-  so people come first, then specific shows, magazines and brands, then the general
-  `fashion/street style` and `fashion/editorial` folders, then misc.
+  so AI images, collages and movie stills come first, then people, specific
+  shows, magazines and brands, then the general `fashion/street style` and
+  `fashion/editorial` folders, social media, fashion items, and screenshots.
+  `learn` puts new rules in the right place in this order.
 - Matching ignores case and separators: `alexa chung` matches `Alexa_Chung_01.jpg`,
   `alexa-chung.jpg` and `AlexaChung2019.jpg`. Keywords of 6+ letters also match
   inside longer words (`alexachungnyfw.jpg`); short ones like `cos` or `hm` only
   match as a whole word, so `cosmos.jpg` is not sent to COS.
-- `suggestions` lists the most frequent words in your filenames that no rule uses
-  yet. Folder names are not counted here (see `folder_report.csv`), and random
+- `suggestions` lists the best candidates for new rules (the same order
+  `learn` uses). Folder names are not counted here (see `folder_report.csv`), and random
   ids like `3f9a2c7e` are skipped. Move useful ones into a rule. Running `scan` again refreshes this list and
   keeps your rules.
 - `ignore_words` adds words that should never count (camera prefixes like `IMG`

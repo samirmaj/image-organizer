@@ -4,18 +4,22 @@ sortimages.py - sort an image folder into folders by keywords in the filenames.
 
 Only needs Python 3.8+ (no extra packages). Works on Windows, macOS and Linux.
 
-Workflow (run these inside your image folder, or pass the folder path):
+Workflow (pass the image folder the first time; keywords.json remembers it):
 
-  1. py sortimages.py scan      Count the words in your filenames (all
-                                subfolders included) and write a starter
-                                keywords.json, a word report and a folder list.
-                                Edit keywords.json to add people, brands, etc.
-  2. py sortimages.py plan      Preview: decide a destination for every image
-                                and write sort_plan.csv. Nothing is moved.
-                                Leftovers are grouped by recurring words.
-  3. py sortimages.py apply     Move the files exactly as sort_plan.csv says
+  1. py sortimages.py scan      Count the words in the filenames of everything
+                                not sorted yet and write keywords.json (starter
+                                rules), a word report and a folder list.
+  2. py sortimages.py learn     Go through the best suggested words one by one
+                                and say what each is (b = brand, p = person,
+                                ...). Each answer becomes a rule.
+  3. py sortimages.py plan      Preview: decide a destination for every image
+                                in _to sort and anything new, and write
+                                sort_plan.csv. Nothing is moved.
+  4. py sortimages.py apply     Move the files exactly as sort_plan.csv says
                                 (you may edit the CSV first). Writes an undo log.
-  4. py sortimages.py undo      Put everything back using the newest undo log.
+  5. py sortimages.py undo      Put everything back using the newest undo log.
+
+  update-rules adds the built-in rules of a new version to your keywords.json.
 
 Use "py" on Windows, "python3" elsewhere. Add --help to any step for options.
 """
@@ -41,6 +45,7 @@ FOLDER_REPORT_NAME = "folder_report.csv"
 PLAN_NAME = "sort_plan.csv"
 ERRORS_NAME = "apply_errors.csv"
 UNDO_PREFIX = "undo_log_"
+LEARN_LOG_NAME = "learn_log.csv"
 
 # Words that say nothing about the content of an image. They are ignored when
 # counting words and when grouping leftovers. Extend via "ignore_words" in
@@ -56,11 +61,42 @@ DEFAULT_IGNORE = {
     "in", "on", "by", "a", "to", "x", "px", "w", "h", "s", "o", "f", "n",
 }
 
+# Folders as they are in the image collection (paths use "/").
+GENERATED = "fashion/generated"
+COLLAGES = "fashion/collages"
+SOCIAL = "fashion/social media"
+ITEMS = "fashion/fashion misc"
+MOVIES = "misc/screenshots/movies"
+SCREENSHOTS = "misc/screenshots"
+
 # Starter rules. Folder paths use "/" and are created inside the image folder.
-# The FIRST matching rule wins: people first, then specific fashion weeks,
-# magazines and brands, then the general fashion folders, then misc.
+# The FIRST matching rule wins:
+#   AI images and collages first (whatever they show), then movie stills,
+#   then people, specific fashion weeks, magazines and brands, then the
+#   general street style and editorial folders, social media, fashion items
+#   without a brand, and last other screenshots.
 STARTER_RULES = collections.OrderedDict([
+    # Sora's images are named like "..._remix_01k0as..." or "..._simple_compose_..".
+    # Bing Image Creator's are named "OIG1.jpg" ("OIP" is Bing image search,
+    # not AI, so it is not here).
+    (GENERATED, ["grok", "chatgpt", "chat gpt", "gpt", "oig", "dalle",
+                 "dall e", "midjourney", "openai", "ai generated",
+                 "aigenerated", "stable diffusion", "remix",
+                 "simple compose"]),
+    (COLLAGES, ["collage", "collages"]),
+    (MOVIES, ["strange darling", "strange darlings", "clueless", "the mask",
+              "prime video", "vlcsnap"]),
+
     ("people/Alexa Chung", ["alexa chung", "alexachung"]),
+    ("people/Cara Delevingne", ["cara delevingne", "delevingne"]),
+    ("people/Hailee Steinfeld", ["hailee steinfeld", "steinfeld", "hailee"]),
+    ("people/Kendall Jenner", ["kendall jenner"]),
+    ("people/Kristen Stewart", ["kristen stewart"]),
+    ("people/Chloe Grace Moretz", ["chloe grace moretz", "chloe moretz",
+                                   "moretz"]),
+    ("people/Keira Knightley", ["keira knightley", "knightley"]),
+    ("people/Ashley Benson", ["ashley benson"]),
+    ("people/Helene Bockhorst", ["helene bockhorst", "bockhorst"]),
 
     ("fashion/street style/New York Fashion Week",
      ["nyfw", "new york fashion week", "nyfashionweek", "ny fashion week"]),
@@ -82,7 +118,8 @@ STARTER_RULES = collections.OrderedDict([
 
     ("fashion/brands/Zara", ["zara"]),
     ("fashion/brands/Mango", ["mango"]),
-    ("fashion/brands/H&M", ["h&m", "hm", "hennes"]),
+    # hmgoepprod / hmprod is how H&M's own product photos are named.
+    ("fashion/brands/H&M", ["h&m", "hm", "hennes", "hmgoepprod", "hmprod"]),
     ("fashion/brands/COS", ["cos"]),
     ("fashion/brands/& Other Stories", ["other stories", "otherstories"]),
     ("fashion/brands/Arket", ["arket"]),
@@ -95,25 +132,97 @@ STARTER_RULES = collections.OrderedDict([
     ("fashion/brands/Prada", ["prada"]),
     ("fashion/brands/Celine", ["celine", "céline"]),
     ("fashion/brands/Chanel", ["chanel"]),
+    ("fashion/brands/Massimo Dutti", ["massimo dutti", "massimo", "dutti"]),
+    ("fashion/brands/ASOS", ["asos"]),
+    ("fashion/brands/Madewell", ["madewell"]),
+    ("fashion/brands/Whistles", ["whistles"]),
+    ("fashion/brands/Zadig & Voltaire", ["zadig voltaire", "zadig"]),
+    ("fashion/brands/AllSaints", ["all saints", "allsaints"]),
+    ("fashion/brands/Topshop", ["topshop"]),
+    ("fashion/brands/Burberry", ["burberry"]),
+    ("fashion/brands/Belstaff", ["belstaff"]),
+    ("fashion/brands/Mackage", ["mackage"]),
+    ("fashion/brands/Anine Bing", ["anine bing"]),
+    ("fashion/brands/Rag & Bone", ["rag bone", "rag & bone", "ragandbone"]),
+    ("fashion/brands/Free People", ["free people"]),
+    ("fashion/brands/Muubaa", ["muubaa"]),
+    ("fashion/brands/Balmain", ["balmain"]),
+    ("fashion/brands/Bershka", ["bershka"]),
+    ("fashion/brands/Isabel Marant", ["isabel marant", "marant"]),
+    ("fashion/brands/Vero Moda", ["vero moda"]),
+    ("fashion/brands/Ralph Lauren", ["ralph lauren"]),
+    ("fashion/brands/Nasty Gal", ["nasty gal"]),
+    ("fashion/brands/Schott", ["schott"]),
+    ("fashion/brands/Nili Lotan", ["nili lotan"]),
+    ("fashion/brands/Pull & Bear", ["pull bear", "pull & bear", "pullandbear"]),
+    ("fashion/brands/Maje", ["maje"]),
+    ("fashion/brands/Balenciaga", ["balenciaga"]),
+    ("fashion/brands/J.Crew", ["jcrew", "j crew"]),
+    ("fashion/brands/BlankNYC", ["blanknyc"]),
 
-    # General folders last, so a specific brand or magazine wins over them.
+    # General folders after the specific ones, so a brand or magazine wins.
     ("fashion/street style", ["street style", "streetstyle", "streetwear",
-                              "street snap", "fashion week", "fw"]),
+                              "street snap", "fashion week", "fw",
+                              "styledumonde"]),
     ("fashion/editorial", ["editorial", "magazine", "cover", "photoshoot",
                            "shoot", "campaign", "lookbook"]),
 
-    ("misc/screenshots", ["screenshot", "screen shot", "bildschirmfoto",
-                          "capture", "snip", "scrnli"]),
+    (SOCIAL, ["instagram", "insta", "snapinsta", "tumblr", "pinterest",
+              "facebook", "twitter", "tiktok", "snapchat"]),
+
+    # Fashion items without a brand, e.g. "leather jacket". Also the German,
+    # French, Spanish, Italian and Polish words that are common in filenames.
+    (ITEMS, ["leather jacket", "leather", "jacket", "jackets", "coat", "trench",
+             "blazer", "bomber", "parka", "puffer", "shearling", "blouson",
+             "perfecto", "dress", "skirt", "jeans", "denim", "trousers",
+             "pants", "leggings", "shirt", "blouse", "sweater", "knitwear",
+             "cardigan", "hoodie", "boots", "loafers", "sneakers", "heels",
+             "sandals", "handbag", "scarf", "gloves", "sunglasses", "outfit",
+             "ootd", "faux fur", "vinyl", "lederjacke", "jacke", "cuir",
+             "chaqueta", "cazadora", "cuero", "piel", "pelle", "kurtka"]),
+
+    (SCREENSHOTS, ["screenshot", "screen shot", "bildschirmfoto",
+                   "capture", "snip", "scrnli"]),
 ])
 
+# Where a new rule goes in the list (lower = checked earlier). 'learn' uses
+# this so a new brand lands next to the other brands, before the general
+# fashion folders. Exact folders first, then the longest matching start.
+RULE_RANKS_EXACT = {
+    GENERATED: 0, COLLAGES: 1, MOVIES: 2,
+    "fashion/street style": 7, "fashion/editorial": 8,
+    SOCIAL: 9, ITEMS: 10, SCREENSHOTS: 12,
+}
+RULE_RANKS_PREFIX = [
+    (GENERATED, 0), (COLLAGES, 1), (MOVIES, 2), ("people", 3),
+    ("fashion/street style", 4), ("fashion/editorial", 5),
+    ("fashion/brands", 6), (SOCIAL, 9), (ITEMS, 10), ("fashion", 10),
+    (SCREENSHOTS, 12), ("misc", 13),
+]
+
+
+def rule_rank(dest):
+    d = dest.strip("/").lower()
+    for k, v in RULE_RANKS_EXACT.items():
+        if d == k.lower():
+            return v
+    best = None
+    for prefix, v in RULE_RANKS_PREFIX:
+        p = prefix.lower()
+        if (d == p or d.startswith(p + "/")) and \
+                (best is None or len(p) > len(best[0])):
+            best = (p, v)
+    return best[1] if best else 11      # unknown folders: before screenshots
+
+
 STARTER_CONFIG_HELP = (
-    "Edit this file to teach the sorter. 'rules' maps a destination folder to "
-    "the keywords that send an image there; the first matching rule wins, so "
-    "keep people at the top and misc at the bottom. Keywords are not case "
+    "Edit this file to teach the sorter, or run 'learn' to do it by answering "
+    "questions. 'rules' maps a destination folder to the keywords that send an "
+    "image there; the first matching rule wins. Keywords are not case "
     "sensitive, and 'alexa chung' also matches alexa_chung, Alexa-Chung and "
-    "AlexaChung. 'suggestions' lists frequent words from your filenames that no "
-    "rule uses yet: move the useful ones into a rule. 'ignore_words' are left "
-    "out of counts and leftover groups."
+    "AlexaChung. 'never_suggest' lists words 'learn' should not offer again. "
+    "'ignore_words' are left out of counts and leftover groups. "
+    "'skip_folders' are never touched (for example the sorting app's _trash)."
 )
 
 
@@ -207,24 +316,63 @@ class Keyword:
         self.allow_substring = len(self.squashed) >= min_squash_len
 
     def matches(self, words, squashed_name):
+        if self.allow_substring:
+            # The keyword's letters appearing anywhere is the looser test.
+            if self.squashed in squashed_name:
+                return True
+        if self.words[0] not in words:      # quick reject
+            return False
         n = len(self.words)
         for i in range(len(words) - n + 1):
             if words[i:i + n] == self.words:
                 return True
-        if self.allow_substring and self.squashed and \
-                self.squashed in squashed_name:
-            return True
         return False
 
 
 # --------------------------------------------------------------------------
-# Config and file discovery
+# Where things are: the image folder, and the data folder that holds
+# keywords.json, the reports, the plan and the undo logs.
+#
+# If a "logs" folder sits next to the keyword-sorter folder (as in the
+# image-organizer project, where logs/ is never uploaded to GitHub), that is
+# the data folder. Otherwise the files go into the image folder itself.
+# keywords.json remembers the image folder, so after the first run
+# "py sortimages.py plan" is enough.
 # --------------------------------------------------------------------------
 
-def load_config(folder):
-    path = os.path.join(folder, CONFIG_NAME)
+def default_data_dir():
+    here = os.path.dirname(os.path.abspath(__file__))
+    logs = os.path.join(os.path.dirname(here), "logs")
+    return logs if os.path.isdir(logs) else None
+
+
+def resolve_paths(args, need_config=True, need_folder=True):
+    """Return (image_folder, data_dir, cfg or None)."""
+    data = getattr(args, "data", None) or default_data_dir()
+    given = getattr(args, "folder", None)
+    if data is None:
+        data = given or "."
+    data = os.path.abspath(data)
+    cfg = None
+    if os.path.exists(os.path.join(data, CONFIG_NAME)):
+        cfg = load_config(data)
+    elif need_config:
+        sys.exit(f"No {CONFIG_NAME} in {data}. Run 'scan' first to create one.")
+    folder = given or (cfg or {}).get("image_folder") or "."
+    folder = os.path.abspath(folder)
+    if need_folder and not os.path.isdir(folder):
+        sys.exit(f"Image folder not found: {folder}\n"
+                 "Pass the image folder, e.g. "
+                 r"py sortimages.py plan C:\Users\me\Pictures\collection")
+    if cfg is not None and need_folder:
+        cfg["image_folder"] = folder
+    return folder, data, cfg
+
+
+def load_config(data_dir):
+    path = os.path.join(data_dir, CONFIG_NAME)
     if not os.path.exists(path):
-        sys.exit(f"No {CONFIG_NAME} in {folder}. Run 'scan' first to create one.")
+        sys.exit(f"No {CONFIG_NAME} in {data_dir}. Run 'scan' first to create one.")
     with open(path, encoding="utf-8") as f:
         try:
             cfg = json.load(f, object_pairs_hook=collections.OrderedDict)
@@ -233,10 +381,21 @@ def load_config(folder):
                      "Tip: every keyword needs quotes and a comma between items.")
     cfg.setdefault("rules", collections.OrderedDict())
     cfg.setdefault("ignore_words", [])
+    cfg.setdefault("never_suggest", [])
+    cfg.setdefault("skip_folders", ["_trash"])
     cfg.setdefault("leftovers_folder", "_to sort")
     cfg.setdefault("min_group_size", 3)
     cfg.setdefault("min_substring_length", 6)
     return cfg
+
+
+def save_config(cfg, data_dir):
+    path = os.path.join(data_dir, CONFIG_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def ignore_set(cfg):
@@ -247,10 +406,11 @@ SYSTEM_DIRS = {"$recycle.bin", "system volume information", "__pycache__",
                "node_modules"}
 
 
-def find_images(folder, top_only=False):
+def find_images(folder, top_only=False, prune=None):
     """Yield paths (relative to folder, with '/') of all images, including
     every subfolder unless top_only is set. Hidden and system folders are
-    skipped."""
+    skipped, and so is every folder for which prune(relative path) is True:
+    those are not even opened, which is what makes a re-run fast."""
     for root, dirs, files in os.walk(folder):
         rel_root = os.path.relpath(root, folder)
         rel_root = "" if rel_root == "." else rel_root.replace(os.sep, "/")
@@ -259,9 +419,14 @@ def find_images(folder, top_only=False):
                 yield f"{rel_root}/{name}" if rel_root else name
         if top_only:
             break
-        dirs[:] = sorted(d for d in dirs
-                         if not d.startswith((".", "$"))
-                         and d.lower() not in SYSTEM_DIRS)
+        keep = []
+        for d in sorted(dirs):
+            if d.startswith((".", "$")) or d.lower() in SYSTEM_DIRS:
+                continue
+            if prune and prune(f"{rel_root}/{d}" if rel_root else d):
+                continue
+            keep.append(d)
+        dirs[:] = keep
 
 
 def folder_parts(rel):
@@ -275,11 +440,34 @@ def under(path, base):
     return p == b or p.startswith(b + "/")
 
 
+def sorted_areas(cfg):
+    """The top folders your rules sort into, e.g. people, fashion, misc.
+    Everything inside them counts as sorted, also folders you made there by
+    hand (like people/Some Name) that no rule knows about."""
+    left = cfg["leftovers_folder"].strip("/").split("/")[0].lower()
+    tops = {d.strip("/").split("/")[0] for d in cfg["rules"]}
+    return sorted(t for t in tops if t and t.lower() != left)
+
+
+def make_pruner(cfg, include_sorted=False):
+    """Folders the sorter never needs to open: skip_folders (like _trash)
+    always, and the sorted areas unless include_sorted is set. What is left
+    is the leftovers folder and anything new you dropped into the image
+    folder."""
+    skip = [s for s in cfg.get("skip_folders", []) if s.strip("/")]
+    areas = [] if include_sorted else sorted_areas(cfg)
+
+    def prune(rel_dir):
+        return any(under(rel_dir, s) for s in skip) or \
+            any(under(rel_dir, a) for a in areas)
+    return prune
+
+
 def already_sorted(rel, cfg):
-    """An image counts as sorted when it sits in a rule's destination folder
-    or in any subfolder you made inside one (e.g. people/Alexa Chung/2019)."""
+    """An image counts as sorted when it sits in a sorted area (see
+    sorted_areas), e.g. people/Alexa Chung/2019 or fashion/brands/Zara."""
     current = "/".join(folder_parts(rel))
-    return any(under(current, dest) for dest in cfg["rules"])
+    return any(under(current, a) for a in sorted_areas(cfg))
 
 
 def in_leftovers(rel, cfg):
@@ -291,13 +479,18 @@ def in_leftovers(rel, cfg):
 # --------------------------------------------------------------------------
 
 def cmd_scan(args):
-    folder = os.path.abspath(args.folder)
-    cfg_path = os.path.join(folder, CONFIG_NAME)
-    existing = None
-    if os.path.exists(cfg_path):
-        existing = load_config(folder)
+    folder, data, existing = resolve_paths(args, need_config=False)
+    os.makedirs(data, exist_ok=True)
     ignore = ignore_set(existing) if existing else set(DEFAULT_IGNORE)
-    files = list(find_images(folder, args.top_only))
+    # Once rules exist, only what is still unsorted is counted (the
+    # leftovers folder and anything new), unless --all is given. That keeps a
+    # re-scan fast and the suggestions about what is left to sort.
+    if existing:
+        prune = make_pruner(existing, include_sorted=args.all)
+    else:
+        prune = make_pruner({"skip_folders": ["_trash"], "rules": {},
+                             "leftovers_folder": "_to sort"})
+    files = list(find_images(folder, args.top_only, prune))
     if not files:
         sys.exit(f"No images found in {folder}.")
     n_folders = len({"/".join(folder_parts(r)) for r in files})
@@ -326,18 +519,7 @@ def cmd_scan(args):
 
     rules = existing["rules"] if existing else STARTER_RULES
     min_sq = existing["min_substring_length"] if existing else 6
-    used = [Keyword(k, min_sq) for kws in rules.values() for k in kws]
-
-    def covered(term):
-        ws = term.split()
-        for kw in used:
-            if kw.matches(ws, squash(term)):
-                return True
-            # 'alexa' alone is covered by the keyword 'alexa chung'
-            n = len(ws)
-            if any(kw.words[i:i + n] == ws for i in range(len(kw.words) - n + 1)):
-                return True
-        return False
+    used = rule_keywords(rules, min_sq)
 
     # Report: every word or word pair seen in at least 2 files.
     rows = []
@@ -345,61 +527,258 @@ def cmd_scan(args):
         # Two-letter words alone ('de', 'ss') are too vague to suggest.
         if n >= 2 and (" " in term or len(term) >= 3):
             rows.append((n, len(word_folders[term]), term,
-                         "yes" if covered(term) else "", examples[term]))
+                         "yes" if term_covered(term, used) else "",
+                         examples[term]))
     rows.sort(key=lambda r: (-r[0], r[2]))
-    with open(os.path.join(folder, REPORT_NAME), "w", newline="",
+    with open(os.path.join(data, REPORT_NAME), "w", newline="",
               encoding="utf-8-sig") as f:
         w = csv_writer(f)
         w.writerow(["files", "folders", "word", "already_in_a_rule",
                     "example_file"])
         w.writerows(rows)
 
-    with open(os.path.join(folder, FOLDER_REPORT_NAME), "w", newline="",
+    with open(os.path.join(data, FOLDER_REPORT_NAME), "w", newline="",
               encoding="utf-8-sig") as f:
         w = csv_writer(f)
         w.writerow(["folder", "images"])
         for name, n in sorted(folder_images.items(), key=lambda x: x[0].lower()):
             w.writerow([name or "(top folder)", n])
 
-    suggestions = [r[2] for r in rows if not r[3]][:args.suggestions]
-
     if existing:
-        existing["suggestions"] = suggestions
         cfg = existing
         action = "Updated the suggestions in"
     else:
         cfg = collections.OrderedDict([
             ("_help", STARTER_CONFIG_HELP),
+            ("image_folder", folder),
             ("rules", STARTER_RULES),
-            ("suggestions", suggestions),
+            ("suggestions", []),
+            ("never_suggest", []),
             ("ignore_words", []),
+            ("skip_folders", ["_trash"]),
             ("leftovers_folder", "_to sort"),
             ("min_group_size", 3),
             ("min_substring_length", 6),
         ])
         action = "Created"
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    report = [ReportRow(r[2], r[0], r[1], r[4]) for r in rows]
+    cands = rank_candidates(report, cfg)[:args.suggestions]
+    cfg["suggestions"] = [c.term for c in cands]
+    save_config(cfg, data)
 
-    print(f"Scanned {len(files)} images in {n_folders} folders under {folder}")
-    print(f"{action} {CONFIG_NAME}")
+    what = "unsorted images" if existing and not args.all else "images"
+    print(f"Scanned {len(files)} {what} in {n_folders} folders under {folder}")
+    print(f"{action} {CONFIG_NAME} in {data}")
     print(f"Wrote {REPORT_NAME} ({len(rows)} recurring filename words "
           "and word pairs)")
-    print(f"Wrote {FOLDER_REPORT_NAME} (your {n_folders} existing folders "
+    print(f"Wrote {FOLDER_REPORT_NAME} ({n_folders} folders "
           "with image counts)")
-    print("\nMost frequent filename words that no rule uses yet:")
+    print("\nBest candidates for new rules (run 'learn' to turn them into rules):")
     print("  files  folders  word")
-    for term in suggestions[:25]:
-        n = word_count.get(term) or pair_count.get(term)
-        print(f"  {n:>5}  {len(word_folders[term]):>7}  {term}")
-    print(f"\nNext: add useful words to the rules in {CONFIG_NAME}, "
-          "then run 'plan' to preview.")
+    for c in cands[:25]:
+        print(f"  {c.files:>5}  {c.folders:>7}  {c.term}")
+    print("\nNext: 'learn' to add rules by answering questions, "
+          "then 'plan' to preview.")
+
+
+# --------------------------------------------------------------------------
+# Suggestions: which words from keyword_report.csv are worth a rule
+# --------------------------------------------------------------------------
+
+# Common words that are never a useful folder, even with 4+ letters.
+STOP_WORDS = {
+    "with", "from", "this", "that", "what", "when", "where", "who", "will",
+    "your", "they", "them", "their", "have", "about", "after", "before",
+    "into", "over", "just", "like", "more", "most", "best", "some", "here",
+    "there", "very", "also", "only", "then", "than", "were", "been", "does",
+    "goes", "wears", "wearing", "seen", "look", "looks", "style", "fashion",
+    "women", "womens", "woman", "girl", "girls", "lady", "free", "online",
+    "shop", "sale", "size", "color", "colour", "black", "white", "blue",
+    "brown", "green", "grey", "gray", "pink", "dark", "light", "long",
+    "short", "high", "real", "true", "best", "default", "product", "normal",
+    "large", "medium", "small", "main", "front", "back", "detail", "details",
+    "scaled", "fullsize", "upload", "assets", "asset", "thumb", "media",
+    "com", "www", "html", "http", "https", "jpg", "jpeg", "png", "webp",
+    "und", "mit", "auf", "ist", "für", "der", "die", "das", "ein",
+    "eine", "los", "las", "del", "con", "para", "pour", "avec", "des",
+    "les", "une", "dans", "january", "february", "march", "april", "june",
+    "july", "august", "september", "october", "november", "december",
+    "juni", "juli", "sept", "spring", "summer", "autumn", "winter", "fall",
+    "season", "collection", "video", "videos", "photo", "photos", "image",
+    "images", "picture", "pictures", "fotos", "bild", "bilder",
+}
+
+
+class ReportRow:
+    __slots__ = ("term", "files", "folders", "example")
+
+    def __init__(self, term, files, folders, example):
+        self.term, self.files, self.folders, self.example = \
+            term, int(files), int(folders), example
+
+
+class Candidate:
+    """A term offered for a new rule. A compound ('massimo dutti') is a word
+    pair that mostly appears together."""
+
+    def __init__(self, row, compound=False, score=None):
+        self.row = row
+        self.term = row.term
+        self.files = row.files
+        self.folders = row.folders
+        self.example = row.example
+        self.compound = compound
+        self.score = row.files if score is None else score
+
+
+def read_report(data_dir):
+    path = os.path.join(data_dir, REPORT_NAME)
+    if not os.path.exists(path):
+        sys.exit(f"No {REPORT_NAME} in {data_dir}. Run 'scan' first.")
+    rows = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for r in csv_dict_reader(f):
+            try:
+                rows.append(ReportRow(r["word"].strip().lower(), r["files"],
+                                      r["folders"], r.get("example_file", "")))
+            except (KeyError, ValueError, AttributeError):
+                continue
+    return rows
+
+
+def rule_keywords(rules, min_sq):
+    return [Keyword(k, min_sq) for kws in rules.values() for k in kws]
+
+
+def term_covered(term, keywords):
+    """True if a rule already catches this term, e.g. 'alexa chung', or
+    'alexa' alone because it is part of the keyword 'alexa chung'."""
+    ws = term.split()
+    sq = squash(term)
+    n = len(ws)
+    for kw in keywords:
+        if kw.matches(ws, sq):
+            return True
+        if any(kw.words[i:i + n] == ws for i in range(len(kw.words) - n + 1)):
+            return True
+    return False
+
+
+def useful_word(w, ignore):
+    """Words of 3 letters or less (oip, ux, de) are never offered alone."""
+    return len(w) >= 4 and not w.isdigit() and w not in STOP_WORDS and \
+        not is_noise(w, ignore)
+
+
+class CoverCache:
+    """Remembers which report terms the rules already cover, so 'learn' only
+    has to test the keywords added since the last question."""
+
+    def __init__(self):
+        self.keys = set()
+        self.covered = set()
+
+    def update(self, terms, used):
+        keys = {k.raw.lower() for k in used}
+        if not self.keys <= keys:          # keywords were removed (undo)
+            self.keys, self.covered = set(), set()
+        new = [k for k in used if k.raw.lower() not in self.keys]
+        if new:
+            for t in terms:
+                if t not in self.covered and term_covered(t, new):
+                    self.covered.add(t)
+        self.keys = keys
+        return self.covered
+
+
+def rank_candidates(report, cfg, skipped=(), min_files=5, compound_share=0.5,
+                    cache=None):
+    """Order the report's terms by how useful a rule for them would be.
+
+    - Terms a rule already covers, terms in never_suggest and terms skipped in
+      this session are left out, so the next best ones move up.
+    - Single words need 4+ letters and must not be a common word.
+    - A word pair counts as a compound when at least compound_share of the
+      files with its rarer word have the pair (massimo dutti: 267 of 274).
+      Compounds come first: right before their own words, and words that
+      almost only appear inside the compound are held back until it is
+      decided.
+    """
+    ignore = ignore_set(cfg)
+    used = rule_keywords(cfg["rules"], int(cfg.get("min_substring_length", 6)))
+    never = {t.lower() for t in cfg.get("never_suggest", [])} | set(skipped)
+    by_term = {r.term: r for r in report}
+    big = [r for r in report if r.files >= min_files and r.term not in never]
+    covered = (cache or CoverCache()).update([r.term for r in big], used)
+    open_rows = [r for r in big if r.term not in covered]
+
+    alone_cache = {}
+
+    def matched_alone(w):
+        if w not in alone_cache:
+            sq = squash(w)
+            alone_cache[w] = any(kw.matches([w], sq) for kw in used)
+        return alone_cache[w]
+
+    # A word that nearly always comes with one partner ('tube' in 'you tube')
+    # belongs to that pair; it does not form other compounds.
+    owner = {}
+    for r in report:
+        ws = r.term.split()
+        if len(ws) != 2:
+            continue
+        for w in ws:
+            s = by_term.get(w)
+            if s and r.files >= 0.8 * s.files and \
+                    r.files > by_term.get(owner.get(w, ""), ReportRow("", 0, 0, "")).files:
+                owner[w] = r.term
+
+    cands, held_back = [], set()
+    for r in open_rows:
+        ws = r.term.split()
+        if len(ws) != 2 or not any(useful_word(w, ignore) for w in ws) or \
+                any(is_noise(w, ignore) or w in STOP_WORDS for w in ws):
+            continue
+        if any(owner.get(w, r.term) != r.term for w in ws):
+            continue
+        # 'de strange' or 'leather biker': a 1-2 letter word, or a word a
+        # rule already matches on its own (those files are sorted anyway).
+        if any(len(w) < 3 or matched_alone(w) for w in ws):
+            continue
+        singles = [by_term.get(w) for w in ws]
+        counts = [x.files for x in singles if x]
+        if not counts or r.files < compound_share * min(counts):
+            continue
+        # Preferred over single words: counted double, but never ahead of
+        # its own more frequent word.
+        score = min(2 * r.files, max(counts) + 0.5)
+        cands.append(Candidate(r, compound=True, score=score))
+        for w in ws:
+            if owner.get(w) == r.term:
+                held_back.add(w)
+    for r in open_rows:
+        if " " in r.term or not useful_word(r.term, ignore):
+            continue
+        if r.term in held_back:
+            continue
+        cands.append(Candidate(r))
+    cands.sort(key=lambda c: (-c.score, c.term))
+    return cands
 
 
 # --------------------------------------------------------------------------
 # plan
 # --------------------------------------------------------------------------
+
+def match_rules(rules, name):
+    """Return (destination, keyword) of the first rule matching name."""
+    words, sq = split_words(name), squash(name)
+    for dest, kws in rules:
+        for kw in kws:
+            if kw.matches(words, sq):
+                return dest, kw.raw
+    return None
+
 
 def group_leftovers(leftovers, ignore, min_size):
     """
@@ -485,24 +864,27 @@ def blocking_file(folder, rel_dir):
 
 
 def cmd_plan(args):
-    folder = os.path.abspath(args.folder)
-    cfg = load_config(folder)
+    folder, data, cfg = resolve_paths(args)
+    save_config(cfg, data)           # remembers the image folder
     ignore = ignore_set(cfg)
     min_sq = int(cfg["min_substring_length"])
     rules = [(dest, [Keyword(k, min_sq) for k in kws])
              for dest, kws in cfg["rules"].items()]
 
-    all_files = list(find_images(folder, args.top_only))
-    # Images already in a destination folder stay where they are, unless
-    # --resort is given. Images in the leftovers folder are always re-checked,
-    # so a re-run with new keywords pulls them out of "_to sort".
-    files = all_files if args.resort else \
-        [f for f in all_files if not already_sorted(f, cfg)]
+    # Only the leftovers folder and anything new are opened: the sorted
+    # folders (people, fashion, misc, ...) are not even listed, and neither
+    # are skip_folders like _trash. --resort opens the sorted ones too.
+    # So a rule that already did its job costs nothing on the next run, and
+    # it still catches new images that show up later.
+    files = list(find_images(folder, args.top_only,
+                             make_pruner(cfg, include_sorted=args.resort)))
+    all_files = files
     if not files:
-        sys.exit(f"No images to sort ({len(all_files)} are already sorted).")
+        sys.exit("No images to sort: everything is in a sorted folder.")
 
     plan = []          # (file, destination folder, reason)
     leftovers = []
+    folder_cache = {}
     for rel in files:
         stem = os.path.splitext(os.path.basename(rel))[0]
         # Try the filename first, then the folders it sits in, innermost first,
@@ -518,15 +900,16 @@ def cmd_plan(args):
              for i in reversed(range(len(parents)))]
         hit = None
         for label, name, below in sources:
-            words, sq = split_words(name), squash(name)
-            for dest, kws in rules:
-                for kw in kws:
-                    if kw.matches(words, sq):
-                        hit = ("/".join([dest] + below), f"{label}: {kw.raw}")
-                        break
-                if hit:
-                    break
-            if hit:
+            # Folder names repeat for every image inside, so cache them.
+            if label == "keyword" or name not in folder_cache:
+                found = match_rules(rules, name)
+                if label != "keyword":
+                    folder_cache[name] = found
+            else:
+                found = folder_cache[name]
+            if found:
+                dest, kw = found
+                hit = ("/".join([dest] + below), f"{label}: {kw}")
                 break
         if hit:
             plan.append([rel, hit[0], hit[1]])
@@ -565,7 +948,7 @@ def cmd_plan(args):
             continue
         rows.append([rel, dest, reason])
 
-    plan_path = os.path.join(folder, PLAN_NAME)
+    plan_path = os.path.join(data, PLAN_NAME)
     with open(plan_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv_writer(f)
         w.writerow(["file", "move_to", "reason"])
@@ -579,7 +962,9 @@ def cmd_plan(args):
     loose = sum(1 for r in rows if r[2] == "no keyword or pattern")
     print(f"Preview for {len(all_files)} images in {folder}  "
           "(nothing was moved)\n")
-    print(f"  {len(all_files) - len(files):>5}  already sorted, left alone")
+    if not args.resort:
+        print("  Sorted folders not opened: "
+              + ", ".join(sorted_areas(cfg)) + " (use --resort to include them)")
     print(f"  {len(files) - len(rows):>5}  already where the plan puts them")
     print(f"  {matched:>5}  keyword in the filename")
     print(f"  {by_folder:>5}  keyword in a folder name")
@@ -618,8 +1003,8 @@ def remove_empty_dirs(dirs, folder):
 
 
 def cmd_apply(args):
-    folder = os.path.abspath(args.folder)
-    plan_path = os.path.join(folder, PLAN_NAME)
+    folder, data, _ = resolve_paths(args, need_config=False)
+    plan_path = os.path.join(data, PLAN_NAME)
     if not os.path.exists(plan_path):
         sys.exit(f"No {PLAN_NAME}. Run 'plan' first.")
     with open(plan_path, newline="", encoding="utf-8-sig") as f:
@@ -634,7 +1019,7 @@ def cmd_apply(args):
             sys.exit("Cancelled, nothing was moved.")
 
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    undo_path = os.path.join(folder, f"{UNDO_PREFIX}{stamp}.csv")
+    undo_path = os.path.join(data, f"{UNDO_PREFIX}{stamp}.csv")
     moved = missing = 0
     errors = []        # (file, move_to, error)
     emptied = set()
@@ -674,7 +1059,7 @@ def cmd_apply(args):
     print(f"Moved {moved} files.")
     if missing:
         print(f"Skipped {missing} files that no longer exist.")
-    err_path = os.path.join(folder, ERRORS_NAME)
+    err_path = os.path.join(data, ERRORS_NAME)
     if not errors and os.path.exists(err_path):
         os.remove(err_path)    # left over from an earlier run
     if errors:
@@ -692,16 +1077,16 @@ def cmd_apply(args):
 
 
 def cmd_undo(args):
-    folder = os.path.abspath(args.folder)
+    folder, data, _ = resolve_paths(args, need_config=False)
     if args.log:
-        log = os.path.join(folder, args.log)
+        log = os.path.join(data, args.log)
     else:
-        logs = sorted(n for n in os.listdir(folder)
+        logs = sorted(n for n in os.listdir(data)
                       if n.startswith(UNDO_PREFIX) and n.endswith(".csv")
                       and not n.endswith("_undone.csv"))
         if not logs:
             sys.exit("No undo log found.")
-        log = os.path.join(folder, logs[-1])
+        log = os.path.join(data, logs[-1])
     with open(log, newline="", encoding="utf-8-sig") as f:
         rows = list(csv_dict_reader(f))
 
@@ -745,16 +1130,270 @@ def cmd_undo(args):
 
 
 # --------------------------------------------------------------------------
+# learn: turn suggestions into rules by answering questions
+# --------------------------------------------------------------------------
+
+# letter: (what it is, folder). "{}" is replaced by the name, e.g.
+# fashion/brands/Massimo Dutti. Folders without "{}" take everything as is;
+# type a name after the letter ("i Leather Jacket") to get a subfolder.
+CATEGORIES = collections.OrderedDict([
+    ("p", ("person", "people/{}")),
+    ("b", ("brand", "fashion/brands/{}")),
+    ("e", ("editorial / magazine", "fashion/editorial/{}")),
+    ("w", ("street style / fashion week", "fashion/street style/{}")),
+    ("i", ("fashion item without a brand", ITEMS)),
+    ("s", ("social media", SOCIAL)),
+    ("g", ("AI generated", GENERATED)),
+    ("c", ("collage", COLLAGES)),
+    ("m", ("movie still", MOVIES)),
+    ("x", ("other screenshot", SCREENSHOTS)),
+])
+
+LEARN_HELP = """
+For each suggested word, type what it is and press Enter:
+""" + "\n".join(f"  {k}  {v[0]:<30} -> {v[1].replace('{}', '<name>')}"
+                for k, v in CATEGORIES.items()) + """
+
+  Add a name after the letter to choose the folder name yourself:
+    b ASOS            -> fashion/brands/ASOS
+    i Leather Jacket  -> fashion/fashion misc/Leather Jacket
+  f <folder>   any other folder, e.g.  f misc/wallpapers
+  Enter        skip for now (it comes back next time)
+  n            never suggest this word again
+  u            undo the last answer
+  ?            show this help
+  q            save and quit
+
+For two-word names like "olivia palermo" you are asked whether each word on
+its own should match too:
+  y  "olivia" and "palermo" alone also match (good for "massimo dutti")
+  n  only the second word alone: "palermo" (good when there is also an
+     "olivia wilde"). The full "olivia palermo" always matches.
+  1  only the first word alone      0  only the full name
+
+Everything is saved after every answer. Run 'plan' and 'apply' afterwards.
+"""
+
+
+def nice_name(term):
+    small = {"and", "of", "the", "de", "la", "le", "von", "van", "der", "&"}
+    out = []
+    for i, w in enumerate(term.split()):
+        out.append(w if (i and w in small) else w[:1].upper() + w[1:])
+    return " ".join(out)
+
+
+def add_rule(cfg, dest, keywords):
+    """Add keywords to the rule for dest, creating the rule at the right
+    place in the list if it is new. Returns the keywords really added."""
+    rules = cfg["rules"]
+    for d in rules:
+        if d.lower() == dest.lower():
+            have = {k.lower() for k in rules[d]}
+            new = [k for k in keywords if k.lower() not in have]
+            rules[d].extend(new)
+            return d, new
+    rank = rule_rank(dest)
+    out = collections.OrderedDict()
+    placed = False
+    for d, kws in rules.items():
+        if not placed and rule_rank(d) > rank:
+            out[dest] = list(keywords)
+            placed = True
+        out[d] = kws
+    if not placed:
+        out[dest] = list(keywords)
+    cfg["rules"] = out
+    return dest, list(keywords)
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return "q"
+
+
+def cmd_learn(args):
+    _, data, cfg = resolve_paths(args, need_folder=False)
+    report = read_report(data)
+    ignore = ignore_set(cfg)
+
+    if args.show:
+        cands = rank_candidates(report, cfg, min_files=args.min_files)
+        print("  files  folders  word")
+        for c in cands[:args.show]:
+            mark = "  (compound)" if c.compound else ""
+            print(f"  {c.files:>5}  {c.folders:>7}  {c.term}{mark}")
+        return
+
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = os.path.join(data, f"keywords_backup_{stamp}.json")
+    shutil.copyfile(os.path.join(data, CONFIG_NAME), backup)
+    log_path = os.path.join(data, LEARN_LOG_NAME)
+    new_log = not os.path.exists(log_path)
+
+    print(LEARN_HELP)
+    print(f"(A copy of your rules from before this session: "
+          f"{os.path.basename(backup)})\n")
+
+    skipped = set()
+    cover = CoverCache()
+    history = []        # snapshots for 'u'
+    added_total = 0
+    with open(log_path, "a", newline="", encoding="utf-8-sig") as lf:
+        lw = csv_writer(lf)
+        if new_log:
+            lw.writerow(["time", "word", "answer", "folder", "keywords"])
+        while True:
+            cands = rank_candidates(report, cfg, skipped,
+                                    min_files=args.min_files, cache=cover)
+            if not cands:
+                print("No more suggestions. Run 'plan' to preview.")
+                break
+            c = cands[0]
+            print(f"[{len(cands)} left]  {c.term}   "
+                  f"({c.files} files in {c.folders} folders)")
+            if c.example:
+                print(f"    e.g. {c.example}")
+            answer = ask("    what is it? ")
+            low = answer.lower()
+
+            if low in ("q", "quit", "exit"):
+                break
+            if low in ("?", "h", "help"):
+                print(LEARN_HELP)
+                continue
+            if low == "u":
+                if not history:
+                    print("    nothing to undo")
+                    continue
+                cfg["rules"], cfg["never_suggest"], skipped = history.pop()
+                save_config(cfg, data)
+                lw.writerow([_dt.datetime.now().isoformat(" ", "seconds"),
+                             "", "undo", "", ""])
+                print("    undone")
+                continue
+
+            snapshot = (json.loads(json.dumps(cfg["rules"]),
+                                   object_pairs_hook=collections.OrderedDict),
+                        list(cfg["never_suggest"]), set(skipped))
+            if low == "":
+                history.append(snapshot)
+                skipped.add(c.term)
+                continue
+            if low == "n":
+                history.append(snapshot)
+                cfg["never_suggest"].append(c.term)
+                save_config(cfg, data)
+                lw.writerow([_dt.datetime.now().isoformat(" ", "seconds"),
+                             c.term, "never", "", ""])
+                lf.flush()
+                continue
+
+            letter, _, name = answer.partition(" ")
+            letter, name = letter.lower(), name.strip()
+            if letter == "f" and name:
+                dest = name.replace("\\", "/").strip("/")
+            elif "/" in answer:
+                dest = answer.replace("\\", "/").strip("/")
+            elif letter in CATEGORIES:
+                pattern = CATEGORIES[letter][1]
+                if "{}" in pattern:
+                    dest = pattern.format(name or nice_name(c.term))
+                else:
+                    dest = f"{pattern}/{name}" if name else pattern
+            else:
+                print("    not understood, type ? for help")
+                continue
+            dest = safe_folder_path(dest)
+
+            keywords = [c.term]
+            words = c.term.split()
+            if len(words) == 2:
+                ok = [w for w in words if useful_word(w, ignore)]
+                if ok:
+                    shown = " / ".join(words)
+                    yn = ask(f"    match both terms ({shown}) on their own "
+                             f"too? y/n [n = only '{words[1]}'] ").lower()
+                    if yn in ("y", "yes", "j", "ja"):
+                        alone = words
+                    elif yn == "1":
+                        alone = words[:1]
+                    elif yn in ("0", "p", "pair"):
+                        alone = []
+                    else:
+                        alone = words[1:]
+                    for w in alone:
+                        if w in ok:
+                            keywords.append(w)
+                        else:
+                            print(f"    '{w}' is too short or too common "
+                                  "to match on its own, left out")
+            history.append(snapshot)
+            dest, new = add_rule(cfg, dest, keywords)
+            save_config(cfg, data)
+            added_total += len(new)
+            lw.writerow([_dt.datetime.now().isoformat(" ", "seconds"),
+                         c.term, answer, dest, ", ".join(keywords)])
+            lf.flush()
+            print(f"    -> {dest}: {', '.join(keywords)}\n")
+
+    print(f"\nSaved {CONFIG_NAME}: {added_total} new keywords this session.")
+    print("Next: 'plan' to preview, then 'apply'. After that, 'scan' counts "
+          "only what is still in _to sort, so 'learn' suggests from what is left.")
+
+
+def cmd_update_rules(args):
+    """Add the built-in rules of this version to an existing keywords.json.
+    Your own rules and keywords stay; new folders are put at the right place
+    in the order; nothing you removed from a rule is added back unless it is
+    new in this version."""
+    _, data, cfg = resolve_paths(args, need_folder=False)
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = os.path.join(data, f"keywords_backup_{stamp}.json")
+    shutil.copyfile(os.path.join(data, CONFIG_NAME), backup)
+    for k in ("never_suggest", "skip_folders"):
+        cfg.setdefault(k, [])
+    if "_trash" not in [x.lower() for x in cfg["skip_folders"]]:
+        cfg["skip_folders"].append("_trash")
+    cfg["_help"] = STARTER_CONFIG_HELP
+    n_rules = n_kw = 0
+    for dest, kws in STARTER_RULES.items():
+        existed = any(d.lower() == dest.lower() for d in cfg["rules"])
+        d, new = add_rule(cfg, dest, kws)
+        if new:
+            n_kw += len(new)
+            if not existed:
+                n_rules += 1
+                print(f"  new rule  {d}: {', '.join(new)}")
+            else:
+                print(f"  added to  {d}: {', '.join(new)}")
+    save_config(cfg, data)
+    print(f"\n{n_rules} new rules, {n_kw} new keywords. Your old rules are in "
+          f"{os.path.basename(backup)}.")
+
+
+# --------------------------------------------------------------------------
 
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="Sort images into folders by keywords in their filenames.",
-        epilog="Run the steps in order: scan, plan, apply. 'undo' reverses apply.")
+        epilog="Run the steps in order: scan, learn, plan, apply. "
+               "'undo' reverses apply.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    def add_data(sp):
+        sp.add_argument("--data", metavar="FOLDER",
+                        help="where keywords.json, the reports, the plan and "
+                             "the undo logs are (default: the logs folder "
+                             "next to keyword-sorter if there is one, else "
+                             "the image folder)")
+
     def add_common(sp):
-        sp.add_argument("folder", nargs="?", default=".",
-                        help="image folder (default: the current folder); "
+        sp.add_argument("folder", nargs="?", default=None,
+                        help="image folder (default: the one remembered in "
+                             "keywords.json, else the current folder); "
                              "all subfolders are included")
         sp.add_argument("--top-only", action="store_true",
                         help="only look at images directly in the folder, "
@@ -762,12 +1401,31 @@ def main(argv=None):
         # Subfolders are always included now; -r is accepted for old habits.
         sp.add_argument("-r", "--recursive", action="store_true",
                         help=argparse.SUPPRESS)
+        add_data(sp)
 
     s = sub.add_parser("scan", help="count filename words, create keywords.json")
     add_common(s)
     s.add_argument("--suggestions", type=int, default=150,
-                   help="how many unused frequent words to list (default 150)")
+                   help="how many candidates to list (default 150)")
+    s.add_argument("--all", action="store_true",
+                   help="count every image, also those in sorted folders "
+                        "(default once rules exist: only what is unsorted)")
     s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("learn", help="turn suggested words into rules by "
+                                     "answering questions")
+    add_data(s)
+    s.add_argument("--min-files", type=int, default=5,
+                   help="only suggest words in at least this many files "
+                        "(default 5)")
+    s.add_argument("--show", type=int, metavar="N",
+                   help="just list the next N suggestions, ask nothing")
+    s.set_defaults(func=cmd_learn)
+
+    s = sub.add_parser("update-rules", help="add this version's built-in "
+                                            "rules to your keywords.json")
+    add_data(s)
+    s.set_defaults(func=cmd_update_rules)
 
     s = sub.add_parser("plan", help="preview where every image would go")
     add_common(s)
@@ -778,13 +1436,15 @@ def main(argv=None):
     s.set_defaults(func=cmd_plan)
 
     s = sub.add_parser("apply", help="move files as written in sort_plan.csv")
-    s.add_argument("folder", nargs="?", default=".")
+    s.add_argument("folder", nargs="?", default=None)
+    add_data(s)
     s.add_argument("-y", "--yes", action="store_true",
                    help="do not ask for confirmation")
     s.set_defaults(func=cmd_apply)
 
     s = sub.add_parser("undo", help="reverse the last apply")
-    s.add_argument("folder", nargs="?", default=".")
+    s.add_argument("folder", nargs="?", default=None)
+    add_data(s)
     s.add_argument("--log", help="a specific undo_log_*.csv to use")
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(func=cmd_undo)
