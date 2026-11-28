@@ -99,6 +99,8 @@
   .detail .pic img.full.dragging { cursor: grabbing; }
   .detail .pic img.preview { position: absolute; object-fit: contain; pointer-events: none; }
   .detail .info-btn { position: absolute; top: 10px; right: 10px; z-index: 2; font-size: 16px; background: rgba(0,0,0,.5); }
+  .detail .trash-btn { position: absolute; top: 10px; right: 10px; z-index: 2; font-size: 16px; background: rgba(0,0,0,.5); }
+  .detail .trash-btn + .info-btn { right: 58px; }
   .detail .selmark { position: absolute; top: 10px; left: 10px; z-index: 2; }
   .detail .selmark.on { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
   .detail .zoomlbl { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 2; pointer-events: none;
@@ -301,6 +303,8 @@
             x-text="cur !== null && items[cur] && sel[items[cur].id] ? '✓ selected' : 'select'"></button>
     <button class="nav prev" @click="step(-1)" :disabled="cur === 0">‹</button>
     <button class="nav next" @click="step(1)" :disabled="cur >= total - 1">›</button>
+    <button class="trash-btn danger" x-show="cur !== null && items[cur] && !inTrash(items[cur].folder)" @click="trashCur()"
+            :disabled="busy" title="Move this image to the trash folder and show the next one (Delete key)">🗑</button>
     <button class="info-btn" x-show="!infoOpen" @click="toggleInfo()" title="Show image information (I)">ⓘ</button>
     <div class="zoomlbl" x-show="zoom.ready && zoom.max > zoom.fit"
          x-text="Math.round(zoom.s * 100) + '%' + (zoom.s < zoom.max - 0.001 ? ' · click or scroll to zoom' : '')"></div>
